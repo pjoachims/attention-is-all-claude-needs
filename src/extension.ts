@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { exec } from 'child_process';
 import { SessionManager, Session } from './sessionManager';
 import { FileWatcher } from './fileWatcher';
 import { SessionTreeProvider } from './views/sessionTreeView';
@@ -644,8 +645,6 @@ function extractPidFromSessionId(sessionId: string): number | null {
  */
 async function getParentPid(pid: number): Promise<number | null> {
     return new Promise((resolve) => {
-        const { exec } = require('child_process');
-
         if (process.platform === 'win32') {
             // Windows: use WMIC or PowerShell
             exec(`wmic process where processid=${pid} get parentprocessid /format:value`, (error: Error | null, stdout: string) => {
@@ -822,7 +821,6 @@ async function findFileToOpen(folderPath: string): Promise<string | null> {
  */
 async function getGitRoot(folderPath: string): Promise<string | null> {
     return new Promise((resolve) => {
-        const { exec } = require('child_process');
         exec(`git -C "${folderPath}" rev-parse --show-toplevel`, (error: Error | null, stdout: string) => {
             if (error) {
                 resolve(null);
@@ -856,8 +854,6 @@ async function switchToVSCodeWindow(folderPath: string, sessionId: string): Prom
     }
 
     return new Promise((resolve) => {
-        const { exec } = require('child_process');
-
         // Open the file - this focuses the window that has it
         exec(`code "${fileToOpen}"`, (error: Error | null) => {
             if (error) {
@@ -937,8 +933,8 @@ function getNotifyScript(): string {
 # Claude Code Attention Monitor - Hook Script
 
 ACTION="$1"
-SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-\$PPID}"
-CWD="\${CLAUDE_WORKING_DIRECTORY:-\$(pwd)}"
+SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-$PPID}"
+CWD="\${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
 SESSIONS_FILE=~/.claude/attention-monitor/sessions.json
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 

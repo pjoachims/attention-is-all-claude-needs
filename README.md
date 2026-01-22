@@ -32,8 +32,8 @@ git clone https://github.com/pjoachims/attention-is-all-claude-needs
 cd attention-is-all-claude-needs
 npm install
 npm run compile
-npx vsce package
-code --install-extension attention-is-all-claude-needs-1.0.0.vsix
+npm run package
+code --install-extension attention-is-all-claude-needs-0.1.0.vsix
 ```
 
 ### First Run
@@ -84,10 +84,12 @@ If there's only one session in a category, it focuses directly. Otherwise, shows
 
 | Platform | Status |
 |----------|--------|
-| macOS | ✅ Full support |
-| Linux | ✅ Full support |
-| Windows | ✅ Full support |
-| WSL | ✅ Use VS Code in Remote-WSL mode |
+| macOS | ✅ Tested |
+| Linux | ⚠️ Untested (should work) |
+| Windows | ⚠️ Untested (should work) |
+| WSL | ⚠️ Untested (use VS Code in Remote-WSL mode) |
+
+> **Note:** Currently only tested on macOS. Linux and Windows support is implemented but not yet verified. Please report issues!
 
 ## Settings
 
