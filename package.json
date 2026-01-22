@@ -1,0 +1,129 @@
+{
+  "name": "attention-is-all-claude-needs",
+  "displayName": "Attention Is All Claude Needs",
+  "description": "Monitor Claude Code sessions across VS Code windows - see which need attention, jump to them instantly",
+  "version": "1.0.0",
+  "publisher": "pjoachims",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pjoachims/attention-is-all-claude-needs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "ai",
+    "assistant",
+    "monitor"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-monitor",
+          "title": "Claude Monitor",
+          "icon": "resources/claude-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-monitor": [
+        {
+          "id": "claudeSessions",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claude-monitor.refresh",
+        "title": "Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-monitor.focusSession",
+        "title": "Focus Session Terminal"
+      },
+      {
+        "command": "claude-monitor.setupHooks",
+        "title": "Claude Monitor: Setup Hooks"
+      },
+      {
+        "command": "claude-monitor.cleanupStaleSessions",
+        "title": "Claude Monitor: Cleanup Stale Sessions"
+      },
+      {
+        "command": "claude-monitor.renameSession",
+        "title": "Rename Session",
+        "icon": "$(edit)"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Monitor",
+      "properties": {
+        "claudeMonitor.cleanupInterval": {
+          "type": "number",
+          "default": 30,
+          "description": "Seconds between automatic cleanup checks for dead sessions"
+        },
+        "claudeMonitor.globalMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, show all Claude sessions across all projects and switch VS Code windows when focusing. When disabled, only show sessions from the current workspace."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "claude-monitor.refresh",
+          "when": "view == claudeSessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claude-monitor.renameSession",
+          "when": "view == claudeSessions && viewItem == session",
+          "group": "inline"
+        },
+        {
+          "command": "claude-monitor.renameSession",
+          "when": "view == claudeSessions && viewItem == session",
+          "group": "1_modify"
+        },
+        {
+          "command": "claude-monitor.focusSession",
+          "when": "view == claudeSessions && viewItem == session",
+          "group": "2_navigate"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  }
+}
