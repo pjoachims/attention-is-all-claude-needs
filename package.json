@@ -32,7 +32,7 @@
       "activitybar": [
         {
           "id": "claude-monitor",
-          "title": "Claude Monitor",
+          "title": "Claude ATTN",
           "icon": "resources/claude-icon.svg"
         }
       ]
@@ -57,11 +57,11 @@
       },
       {
         "command": "claude-monitor.setupHooks",
-        "title": "Claude Monitor: Setup Hooks"
+        "title": "Claude ATTN: Setup Hooks"
       },
       {
         "command": "claude-monitor.cleanupStaleSessions",
-        "title": "Claude Monitor: Cleanup Stale Sessions"
+        "title": "Claude ATTN: Cleanup Stale Sessions"
       },
       {
         "command": "claude-monitor.renameSession",
@@ -70,7 +70,7 @@
       }
     ],
     "configuration": {
-      "title": "Claude Monitor",
+      "title": "Claude ATTN",
       "properties": {
         "claudeMonitor.cleanupInterval": {
           "type": "number",
