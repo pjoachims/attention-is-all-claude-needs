@@ -25,6 +25,14 @@ $(hubot) $(bell-dot) 2 $(clock) 1 $(play) 3
 
 ## Installation
 
+### From GitHub Release
+
+1. Download the latest `.vsix` from [Releases](https://github.com/pjoachims/attention-is-all-claude-needs/releases)
+2. Install with:
+   ```bash
+   code --install-extension attention-is-all-claude-needs-0.1.0.vsix
+   ```
+
 ### From Source
 
 ```bash
@@ -100,8 +108,8 @@ If there's only one session in a category, it focuses directly. Otherwise, shows
 
 ## Commands
 
-- `Claude Monitor: Setup Hooks` - Configure Claude Code hooks
-- `Claude Monitor: Cleanup Stale Sessions` - Remove dead sessions
+- `Claude ATTN: Setup Hooks` - Configure Claude Code hooks
+- `Claude ATTN: Cleanup Stale Sessions` - Remove dead sessions
 - `Refresh Sessions` - Manually refresh session list
 
 ## Requirements
