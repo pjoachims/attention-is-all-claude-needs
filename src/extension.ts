@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { exec } from 'child_process';
 import { SessionManager, Session } from './sessionManager';
+import { DirectoryWatcher } from './directoryWatcher';
 import { FileWatcher } from './fileWatcher';
 import { SessionTreeProvider } from './views/sessionTreeView';
 import { SessionCleaner } from './sessionCleaner';
@@ -14,7 +15,7 @@ let outputChannel: vscode.OutputChannel;
 let globalSessionManager: SessionManager;
 
 // Focus request file for cross-window communication
-const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'attention-monitor', 'focus-request.json');
+const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'focus-request.json');
 
 interface FocusRequest {
     sessionId: string;
@@ -37,7 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const sessionManager = new SessionManager();
     globalSessionManager = sessionManager;
-    const fileWatcher = new FileWatcher(sessionManager.getSessionsFilePath());
+    const directoryWatcher = new DirectoryWatcher(sessionManager.getSessionsDirPath());
     const treeProvider = new SessionTreeProvider(sessionManager);
 
     // Create status bar items (priority determines order, higher = more left)
@@ -101,12 +102,12 @@ export function activate(context: vscode.ExtensionContext) {
         showCollapseAll: true
     });
 
-    fileWatcher.onDidChange(async () => {
-        outputChannel.appendLine('Sessions file changed, reloading...');
+    directoryWatcher.onDidChange(async () => {
+        outputChannel.appendLine('Sessions directory changed, reloading...');
         await sessionManager.loadSessions();
     });
 
-    fileWatcher.start();
+    directoryWatcher.start();
     sessionManager.loadSessions();
 
     // Watch for cross-window focus requests
@@ -169,6 +170,32 @@ export function activate(context: vscode.ExtensionContext) {
         'claude-monitor.setupHooks',
         async () => {
             await setupClaudeHooks(context);
+        }
+    );
+
+    const removeHooksCommand = vscode.commands.registerCommand(
+        'claude-monitor.removeHooks',
+        async () => {
+            const confirm = await vscode.window.showWarningMessage(
+                'This will remove Claude ATTN hooks from Claude Code settings and delete all session data. Continue?',
+                { modal: true },
+                'Remove Hooks'
+            );
+
+            if (confirm !== 'Remove Hooks') {
+                return;
+            }
+
+            try {
+                await removeClaudeHooks();
+                vscode.window.showInformationMessage(
+                    'Claude ATTN hooks removed. You can now safely uninstall the extension.'
+                );
+            } catch (error) {
+                vscode.window.showErrorMessage(
+                    `Failed to remove hooks: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
         }
     );
 
@@ -263,7 +290,7 @@ export function activate(context: vscode.ExtensionContext) {
         sbIdle,
         sbRunning,
         sessionManager,
-        fileWatcher,
+        directoryWatcher,
         treeView,
         refreshCommand,
         focusSessionCommand,
@@ -272,6 +299,7 @@ export function activate(context: vscode.ExtensionContext) {
         clickRunningCommand,
         clickIdleCommand,
         setupHooksCommand,
+        removeHooksCommand,
         sessionCleaner,
         cleanupCommand,
         renameSessionCommand
@@ -888,17 +916,21 @@ async function checkHooksSetup(context: vscode.ExtensionContext): Promise<void> 
 
 async function setupClaudeHooks(context: vscode.ExtensionContext): Promise<void> {
     const claudeDir = path.join(os.homedir(), '.claude');
-    const monitorDir = path.join(claudeDir, 'attention-monitor');
+    const monitorDir = path.join(claudeDir, 'claude-attn');
+    const sessionsDir = path.join(monitorDir, 'sessions');
     const settingsPath = path.join(claudeDir, 'settings.json');
-    const notifyScriptPath = path.join(monitorDir, 'notify.sh');
+
+    const isWindows = process.platform === 'win32';
+    const scriptExt = isWindows ? '.cmd' : '.sh';
+    const notifyScriptPath = path.join(monitorDir, `notify${scriptExt}`);
 
     try {
-        if (!fs.existsSync(monitorDir)) {
-            fs.mkdirSync(monitorDir, { recursive: true });
+        if (!fs.existsSync(sessionsDir)) {
+            fs.mkdirSync(sessionsDir, { recursive: true });
         }
 
-        const notifyScript = getNotifyScript();
-        fs.writeFileSync(notifyScriptPath, notifyScript, { mode: 0o755 });
+        const notifyScript = isWindows ? getNotifyScriptWindows() : getNotifyScriptUnix();
+        fs.writeFileSync(notifyScriptPath, notifyScript, { mode: isWindows ? 0o644 : 0o755 });
 
         let settings: Record<string, unknown> = {};
         if (fs.existsSync(settingsPath)) {
@@ -928,75 +960,125 @@ async function setupClaudeHooks(context: vscode.ExtensionContext): Promise<void>
     }
 }
 
-function getNotifyScript(): string {
+async function removeClaudeHooks(): Promise<void> {
+    const claudeDir = path.join(os.homedir(), '.claude');
+    const monitorDir = path.join(claudeDir, 'claude-attn');
+    const settingsPath = path.join(claudeDir, 'settings.json');
+
+    // Remove hooks from Claude Code settings
+    if (fs.existsSync(settingsPath)) {
+        const content = fs.readFileSync(settingsPath, 'utf-8');
+        const settings = JSON.parse(content) as Record<string, unknown>;
+
+        if (settings.hooks && typeof settings.hooks === 'object') {
+            const hooks = settings.hooks as Record<string, unknown[]>;
+
+            // Filter out any hooks containing 'claude-attn'
+            for (const [key, value] of Object.entries(hooks)) {
+                if (Array.isArray(value)) {
+                    hooks[key] = value.filter(
+                        (h: unknown) => !JSON.stringify(h).includes('claude-attn')
+                    );
+                    // Remove empty arrays
+                    if (hooks[key].length === 0) {
+                        delete hooks[key];
+                    }
+                }
+            }
+
+            // Remove hooks object if empty
+            if (Object.keys(hooks).length === 0) {
+                delete settings.hooks;
+            }
+
+            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+        }
+    }
+
+    // Delete the attention-monitor directory
+    if (fs.existsSync(monitorDir)) {
+        fs.rmSync(monitorDir, { recursive: true, force: true });
+    }
+
+    outputChannel.appendLine('Hooks removed successfully');
+    outputChannel.appendLine(`Deleted directory: ${monitorDir}`);
+    outputChannel.appendLine(`Updated settings: ${settingsPath}`);
+}
+
+function getNotifyScriptUnix(): string {
     return `#!/bin/bash
-# Claude Code Attention Monitor - Hook Script
+# Claude Code Attention Monitor - Fast Hook Script
+# Uses one file per session - no JSON parsing needed
+
+[[ "$TERM_PROGRAM" != "vscode" ]] && exit 0
 
 ACTION="$1"
-SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-$PPID}"
+REASON="\${2:-permission_prompt}"
 CWD="\${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-SESSIONS_FILE=~/.claude/attention-monitor/sessions.json
+SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-$PPID}"
+SESSIONS_DIR=~/.claude/claude-attn/sessions
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Ensure directory exists
-mkdir -p "$(dirname "$SESSIONS_FILE")"
-
-# Initialize file if it doesn't exist
-if [ ! -f "$SESSIONS_FILE" ]; then
-    echo '{"sessions":{}}' > "$SESSIONS_FILE"
-fi
-
-# Function to update session
-update_session() {
-    local status="$1"
-    local reason="$2"
-
-    # Use Node.js for reliable JSON manipulation (available if Claude Code is installed)
-    node -e "
-        const fs = require('fs');
-        const path = '$SESSIONS_FILE';
-        let data = { sessions: {} };
-        try {
-            data = JSON.parse(fs.readFileSync(path, 'utf-8'));
-        } catch (e) {}
-
-        if ('$status' === 'ended') {
-            delete data.sessions['$SESSION_ID'];
-        } else {
-            data.sessions['$SESSION_ID'] = {
-                id: '$SESSION_ID',
-                status: '$status',
-                reason: '$reason' || undefined,
-                cwd: '$CWD',
-                lastUpdate: '$TIMESTAMP'
-            };
-        }
-
-        fs.writeFileSync(path, JSON.stringify(data, null, 2));
-    " 2>/dev/null || {
-        # Fallback: simple file write (less reliable for concurrent access)
-        echo '{"sessions":{"'$SESSION_ID'":{"id":"'$SESSION_ID'","status":"'$status'","cwd":"'$CWD'","lastUpdate":"'$TIMESTAMP'"}}}' > "$SESSIONS_FILE"
-    }
-}
+mkdir -p "$SESSIONS_DIR"
+SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.json"
 
 case "$ACTION" in
     attention)
-        update_session "attention" "\${2:-permission_prompt}"
+        printf '{"id":"%s","status":"attention","reason":"%s","cwd":"%s","lastUpdate":"%s"}' \\
+            "$SESSION_ID" "$REASON" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
     start)
-        update_session "running" ""
+        printf '{"id":"%s","status":"running","cwd":"%s","lastUpdate":"%s"}' \\
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
     end)
-        update_session "ended" ""
+        rm -f "$SESSION_FILE"
         ;;
     idle)
-        update_session "idle" ""
-        ;;
-    *)
-        echo "Unknown action: $ACTION" >&2
-        exit 1
+        printf '{"id":"%s","status":"idle","cwd":"%s","lastUpdate":"%s"}' \\
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
 esac
+`;
+}
+
+function getNotifyScriptWindows(): string {
+    return `@echo off
+:: Claude Code Attention Monitor - Fast Windows Hook Script
+setlocal enabledelayedexpansion
+
+set "ACTION=%~1"
+set "REASON=%~2"
+if "%REASON%"=="" set "REASON=permission_prompt"
+
+if defined CLAUDE_SESSION_ID (
+    set "SESSION_ID=%CLAUDE_SESSION_ID%"
+) else (
+    set "SESSION_ID=win-%RANDOM%%RANDOM%"
+)
+
+if defined CLAUDE_WORKING_DIRECTORY (
+    set "CWD=%CLAUDE_WORKING_DIRECTORY%"
+) else (
+    set "CWD=%CD%"
+)
+
+set "SESSIONS_DIR=%USERPROFILE%\\.claude\\claude-attn\\sessions"
+if not exist "%SESSIONS_DIR%" mkdir "%SESSIONS_DIR%"
+set "SESSION_FILE=%SESSIONS_DIR%\\%SESSION_ID%.json"
+
+for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value') do set "DT=%%I"
+set "TIMESTAMP=%DT:~0,4%-%DT:~4,2%-%DT:~6,2%T%DT:~8,2%:%DT:~10,2%:%DT:~12,2%Z"
+
+if "%ACTION%"=="attention" (
+    echo {"id":"%SESSION_ID%","status":"attention","reason":"%REASON%","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+) else if "%ACTION%"=="start" (
+    echo {"id":"%SESSION_ID%","status":"running","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+) else if "%ACTION%"=="end" (
+    if exist "%SESSION_FILE%" del "%SESSION_FILE%"
+) else if "%ACTION%"=="idle" (
+    echo {"id":"%SESSION_ID%","status":"idle","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+)
 `;
 }
 
@@ -1057,7 +1139,7 @@ function mergeHooks(
             const existingHooks = merged[key] as unknown[];
             const newHookArray = value as unknown[];
             const filtered = existingHooks.filter(
-                (h: unknown) => !JSON.stringify(h).includes('attention-monitor')
+                (h: unknown) => !JSON.stringify(h).includes('claude-attn')
             );
             merged[key] = [...filtered, ...newHookArray];
         } else {

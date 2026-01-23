@@ -1,74 +1,35 @@
 #!/bin/bash
-# Claude Code Attention Monitor - Hook Script
-# This script is called by Claude Code hooks to update session state
+# Claude Code Attention Monitor - Fast Hook Script
+# Uses one file per session to avoid JSON parsing overhead
 
 # Only track sessions from VS Code integrated terminal
-if [ "$TERM_PROGRAM" != "vscode" ]; then
-    exit 0
-fi
+[[ "$TERM_PROGRAM" != "vscode" ]] && exit 0
 
 ACTION="$1"
+REASON="${2:-permission_prompt}"
 CWD="${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-# Use PPID (parent process ID) as unique session identifier since CLAUDE_SESSION_ID isn't available
 SESSION_ID="${CLAUDE_SESSION_ID:-ppid-$PPID}"
-SESSIONS_FILE=~/.claude/attention-monitor/sessions.json
+SESSIONS_DIR=~/.claude/claude-attn/sessions
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Ensure directory exists
-mkdir -p "$(dirname "$SESSIONS_FILE")"
+mkdir -p "$SESSIONS_DIR"
 
-# Initialize file if it doesn't exist
-if [ ! -f "$SESSIONS_FILE" ]; then
-    echo '{"sessions":{}}' > "$SESSIONS_FILE"
-fi
-
-# Function to update session using Node.js for reliable JSON manipulation
-update_session() {
-    local status="$1"
-    local reason="$2"
-
-    node -e "
-        const fs = require('fs');
-        const path = '$SESSIONS_FILE';
-        let data = { sessions: {} };
-        try {
-            data = JSON.parse(fs.readFileSync(path, 'utf-8'));
-        } catch (e) {}
-
-        if ('$status' === 'ended') {
-            delete data.sessions['$SESSION_ID'];
-        } else {
-            data.sessions['$SESSION_ID'] = {
-                id: '$SESSION_ID',
-                status: '$status',
-                reason: '$reason' || undefined,
-                cwd: '$CWD',
-                lastUpdate: '$TIMESTAMP'
-            };
-        }
-
-        fs.writeFileSync(path, JSON.stringify(data, null, 2));
-    " 2>/dev/null || {
-        # Fallback: simple file write (less reliable for concurrent access)
-        echo '{"sessions":{"'$SESSION_ID'":{"id":"'$SESSION_ID'","status":"'$status'","cwd":"'$CWD'","lastUpdate":"'$TIMESTAMP'"}}}' > "$SESSIONS_FILE"
-    }
-}
+SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.json"
 
 case "$ACTION" in
     attention)
-        update_session "attention" "${2:-permission_prompt}"
+        printf '{"id":"%s","status":"attention","reason":"%s","cwd":"%s","lastUpdate":"%s"}' \
+            "$SESSION_ID" "$REASON" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
     start)
-        update_session "running" ""
+        printf '{"id":"%s","status":"running","cwd":"%s","lastUpdate":"%s"}' \
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
     end)
-        update_session "ended" ""
+        rm -f "$SESSION_FILE"
         ;;
     idle)
-        update_session "idle" ""
-        ;;
-    *)
-        echo "Unknown action: $ACTION" >&2
-        exit 1
+        printf '{"id":"%s","status":"idle","cwd":"%s","lastUpdate":"%s"}' \
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
         ;;
 esac

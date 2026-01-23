@@ -2,7 +2,7 @@
   "name": "attention-is-all-claude-needs",
   "displayName": "Attention Is All Claude Needs",
   "description": "Monitor Claude Code sessions across VS Code windows - see which need attention, jump to them instantly",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "pjoachims",
   "repository": {
     "type": "git",
@@ -67,6 +67,10 @@
         "command": "claude-monitor.renameSession",
         "title": "Rename Session",
         "icon": "$(edit)"
+      },
+      {
+        "command": "claude-monitor.removeHooks",
+        "title": "Claude ATTN: Remove Hooks (Uninstall)"
       }
     ],
     "configuration": {

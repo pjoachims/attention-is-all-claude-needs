@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
-import { AtomicFileOps } from './atomicFileOps';
+import * as fs from 'fs';
 
 export type SessionStatus = 'attention' | 'running' | 'idle';
 
@@ -13,40 +13,49 @@ export interface Session {
     lastUpdate: string;
 }
 
-export interface SessionsData {
-    sessions: Record<string, Session>;
-}
-
 export class SessionManager {
     private sessions: Map<string, Session> = new Map();
     private readonly _onDidChange = new vscode.EventEmitter<void>();
     readonly onDidChange = this._onDidChange.event;
 
-    private readonly sessionsFilePath: string;
-    private readonly fileOps: AtomicFileOps;
+    private readonly sessionsDirPath: string;
 
     constructor() {
-        this.sessionsFilePath = path.join(
+        this.sessionsDirPath = path.join(
             os.homedir(),
             '.claude',
-            'attention-monitor',
-            'sessions.json'
+            'claude-attn',
+            'sessions'
         );
-        this.fileOps = new AtomicFileOps(this.sessionsFilePath);
     }
 
-    getSessionsFilePath(): string {
-        return this.sessionsFilePath;
+    getSessionsDirPath(): string {
+        return this.sessionsDirPath;
     }
 
     async loadSessions(): Promise<void> {
         try {
-            const data = await this.fileOps.readJson<SessionsData>();
-
             this.sessions.clear();
-            if (data && data.sessions) {
-                for (const [id, session] of Object.entries(data.sessions)) {
-                    this.sessions.set(id, session);
+
+            if (!fs.existsSync(this.sessionsDirPath)) {
+                fs.mkdirSync(this.sessionsDirPath, { recursive: true });
+                this._onDidChange.fire();
+                return;
+            }
+
+            const files = fs.readdirSync(this.sessionsDirPath);
+            for (const file of files) {
+                if (!file.endsWith('.json')) {continue;}
+
+                try {
+                    const filePath = path.join(this.sessionsDirPath, file);
+                    const content = fs.readFileSync(filePath, 'utf-8');
+                    const session: Session = JSON.parse(content);
+                    if (session.id && session.status) {
+                        this.sessions.set(session.id, session);
+                    }
+                } catch {
+                    // Skip invalid files
                 }
             }
 
@@ -63,42 +72,30 @@ export class SessionManager {
     }
 
     async removeSessions(sessionIds: string[]): Promise<void> {
-        if (sessionIds.length === 0) {
-            return;
+        for (const id of sessionIds) {
+            const filePath = path.join(this.sessionsDirPath, `${id}.json`);
+            try {
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+            } catch {
+                // Ignore errors
+            }
         }
-
-        const idsToRemove = new Set(sessionIds);
-
-        await this.fileOps.modifyJson<SessionsData>((data) => {
-            if (!data || !data.sessions) {
-                return data;
-            }
-
-            for (const id of idsToRemove) {
-                delete data.sessions[id];
-            }
-
-            return data;
-        });
-
-        // Reload to update local state
         await this.loadSessions();
     }
 
     async updateSessionStatus(sessionId: string, status: SessionStatus): Promise<void> {
-        await this.fileOps.modifyJson<SessionsData>((data) => {
-            if (!data || !data.sessions || !data.sessions[sessionId]) {
-                return data;
-            }
+        const session = this.sessions.get(sessionId);
+        if (!session) {return;}
 
-            data.sessions[sessionId].status = status;
-            data.sessions[sessionId].reason = undefined;
-            data.sessions[sessionId].lastUpdate = new Date().toISOString();
+        session.status = status;
+        session.reason = undefined;
+        session.lastUpdate = new Date().toISOString();
 
-            return data;
-        });
+        const filePath = path.join(this.sessionsDirPath, `${sessionId}.json`);
+        fs.writeFileSync(filePath, JSON.stringify(session));
 
-        // Reload to update local state
         await this.loadSessions();
     }
 
