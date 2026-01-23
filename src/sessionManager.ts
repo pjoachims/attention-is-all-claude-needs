@@ -37,6 +37,9 @@ export class SessionManager {
         try {
             this.sessions.clear();
 
+            console.log(`[SessionManager] Loading from: ${this.sessionsDirPath}`);
+            console.log(`[SessionManager] Directory exists: ${fs.existsSync(this.sessionsDirPath)}`);
+
             if (!fs.existsSync(this.sessionsDirPath)) {
                 fs.mkdirSync(this.sessionsDirPath, { recursive: true });
                 this._onDidChange.fire();
@@ -44,6 +47,8 @@ export class SessionManager {
             }
 
             const files = fs.readdirSync(this.sessionsDirPath);
+            console.log(`[SessionManager] Found ${files.length} files: ${files.join(', ')}`);
+
             for (const file of files) {
                 if (!file.endsWith('.json')) {continue;}
 
@@ -53,15 +58,17 @@ export class SessionManager {
                     const session: Session = JSON.parse(content);
                     if (session.id && session.status) {
                         this.sessions.set(session.id, session);
+                        console.log(`[SessionManager] Loaded session: ${session.id} (${session.status})`);
                     }
-                } catch {
-                    // Skip invalid files
+                } catch (e) {
+                    console.error(`[SessionManager] Failed to parse ${file}:`, e);
                 }
             }
 
+            console.log(`[SessionManager] Total sessions loaded: ${this.sessions.size}`);
             this._onDidChange.fire();
         } catch (error) {
-            console.error('Failed to load sessions:', error);
+            console.error('[SessionManager] Failed to load sessions:', error);
             this.sessions.clear();
             this._onDidChange.fire();
         }

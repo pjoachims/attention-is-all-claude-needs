@@ -33,7 +33,7 @@ let sbRunning: vscode.StatusBarItem;
 let recentTerminal: { terminal: vscode.Terminal; timestamp: number } | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
-    outputChannel = vscode.window.createOutputChannel('Claude Monitor');
+    outputChannel = vscode.window.createOutputChannel('Claude ATTN');
     outputChannel.appendLine('Claude Code Attention Monitor activated');
 
     const sessionManager = new SessionManager();
@@ -316,6 +316,8 @@ function getFilteredSessions(sessionManager: SessionManager): Session[] {
     const allSessions = sessionManager.getAllSessions();
     const globalMode = vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('globalMode', false);
 
+    console.log(`[getFilteredSessions] Total sessions: ${allSessions.length}, globalMode: ${globalMode}`);
+
     if (globalMode) {
         return allSessions;
     }
@@ -323,14 +325,27 @@ function getFilteredSessions(sessionManager: SessionManager): Session[] {
     // Filter to sessions within current workspace folders
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
+        console.log('[getFilteredSessions] No workspace folders, returning all');
         return allSessions; // No workspace, show all
     }
 
     const workspacePaths = workspaceFolders.map(f => f.uri.fsPath);
-    return allSessions.filter(session => {
-        if (!session.cwd) { return false; }
-        return workspacePaths.some(wp => session.cwd!.startsWith(wp));
+    console.log(`[getFilteredSessions] Workspace paths: ${workspacePaths.join(', ')}`);
+
+    const filtered = allSessions.filter(session => {
+        if (!session.cwd) {
+            console.log(`[getFilteredSessions] Session ${session.id} has no cwd`);
+            return false;
+        }
+        // Unescape backslashes from JSON-escaped cwd for comparison
+        const normalizedCwd = session.cwd.replace(/\\\\/g, '\\');
+        const matches = workspacePaths.some(wp => normalizedCwd.toLowerCase().startsWith(wp.toLowerCase()));
+        console.log(`[getFilteredSessions] Session ${session.id} cwd: "${session.cwd}" -> normalized: "${normalizedCwd}" -> matches: ${matches}`);
+        return matches;
     });
+
+    console.log(`[getFilteredSessions] Filtered to ${filtered.length} sessions`);
+    return filtered;
 }
 
 function updateStatusBar(sessionManager: SessionManager): void {
@@ -932,6 +947,12 @@ async function setupClaudeHooks(context: vscode.ExtensionContext): Promise<void>
         const notifyScript = isWindows ? getNotifyScriptWindows() : getNotifyScriptUnix();
         fs.writeFileSync(notifyScriptPath, notifyScript, { mode: isWindows ? 0o644 : 0o755 });
 
+        // On Windows, also deploy the PowerShell helper script
+        if (isWindows) {
+            const psScriptPath = path.join(monitorDir, 'get-claude-pid.ps1');
+            fs.writeFileSync(psScriptPath, getClaudePidScript());
+        }
+
         let settings: Record<string, unknown> = {};
         if (fs.existsSync(settingsPath)) {
             const content = fs.readFileSync(settingsPath, 'utf-8');
@@ -1044,17 +1065,25 @@ esac
 
 function getNotifyScriptWindows(): string {
     return `@echo off
-:: Claude Code Attention Monitor - Fast Windows Hook Script
 setlocal enabledelayedexpansion
 
 set "ACTION=%~1"
 set "REASON=%~2"
 if "%REASON%"=="" set "REASON=permission_prompt"
 
+:: Set PS script path first (before any if blocks for proper variable expansion)
+set "PS_SCRIPT=%USERPROFILE%\\.claude\\claude-attn\\get-claude-pid.ps1"
+
 if defined CLAUDE_SESSION_ID (
     set "SESSION_ID=%CLAUDE_SESSION_ID%"
 ) else (
-    set "SESSION_ID=win-%RANDOM%%RANDOM%"
+    set "SESSION_ID="
+    :: Get Claude Code's PID via PowerShell helper script
+    for /f "usebackq delims=" %%P in (\`powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"\`) do (
+        set "SESSION_ID=ppid-%%P"
+    )
+    :: Fallback to random if PowerShell fails
+    if "!SESSION_ID!"=="" set "SESSION_ID=win-%RANDOM%%RANDOM%"
 )
 
 if defined CLAUDE_WORKING_DIRECTORY (
@@ -1062,27 +1091,58 @@ if defined CLAUDE_WORKING_DIRECTORY (
 ) else (
     set "CWD=%CD%"
 )
+:: Escape backslashes for JSON
+set "CWD=!CWD:\\=\\\\!"
 
 set "SESSIONS_DIR=%USERPROFILE%\\.claude\\claude-attn\\sessions"
 if not exist "%SESSIONS_DIR%" mkdir "%SESSIONS_DIR%"
-set "SESSION_FILE=%SESSIONS_DIR%\\%SESSION_ID%.json"
+set "SESSION_FILE=%SESSIONS_DIR%\\!SESSION_ID!.json"
 
-for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value') do set "DT=%%I"
-set "TIMESTAMP=%DT:~0,4%-%DT:~4,2%-%DT:~6,2%T%DT:~8,2%:%DT:~10,2%:%DT:~12,2%Z"
+:: Get timestamp via PowerShell (more reliable than WMIC)
+for /f "usebackq delims=" %%T in (\`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'"\`) do set "TIMESTAMP=%%T"
+if not defined TIMESTAMP set "TIMESTAMP=unknown"
 
 if "%ACTION%"=="attention" (
-    echo {"id":"%SESSION_ID%","status":"attention","reason":"%REASON%","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"attention","reason":"%REASON%","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
 ) else if "%ACTION%"=="start" (
-    echo {"id":"%SESSION_ID%","status":"running","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"running","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
 ) else if "%ACTION%"=="end" (
     if exist "%SESSION_FILE%" del "%SESSION_FILE%"
 ) else if "%ACTION%"=="idle" (
-    echo {"id":"%SESSION_ID%","status":"idle","cwd":"%CWD%","lastUpdate":"%TIMESTAMP%"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"idle","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
 )
 `;
 }
 
+function getClaudePidScript(): string {
+    return `# Walk up the process tree to find Claude Code (node.exe or claude.exe)
+$currentPid = $PID
+$maxLevels = 10
+
+for ($i = 0; $i -lt $maxLevels; $i++) {
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
+    if (-not $proc) { break }
+
+    $parentPid = $proc.ParentProcessId
+    $parentProc = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction SilentlyContinue
+    if (-not $parentProc) { break }
+
+    # Check if parent is node.exe or claude.exe (Claude Code)
+    if ($parentProc.Name -eq "node.exe" -or $parentProc.Name -eq "claude.exe") {
+        Write-Host $parentPid
+        exit 0
+    }
+
+    $currentPid = $parentPid
+}
+`;
+}
+
 function getHooksConfig(notifyScriptPath: string): Record<string, unknown> {
+    const isWindows = process.platform === 'win32';
+    // On Windows, we need cmd.exe /c to run batch files
+    const cmdPrefix = isWindows ? 'cmd.exe /c ' : '';
+
     return {
         Notification: [
             {
@@ -1090,7 +1150,7 @@ function getHooksConfig(notifyScriptPath: string): Record<string, unknown> {
                 hooks: [
                     {
                         type: 'command',
-                        command: `${notifyScriptPath} attention`
+                        command: `${cmdPrefix}"${notifyScriptPath}" attention`
                     }
                 ]
             }
@@ -1100,7 +1160,7 @@ function getHooksConfig(notifyScriptPath: string): Record<string, unknown> {
                 hooks: [
                     {
                         type: 'command',
-                        command: `${notifyScriptPath} start`
+                        command: `${cmdPrefix}"${notifyScriptPath}" start`
                     }
                 ]
             }
@@ -1110,7 +1170,7 @@ function getHooksConfig(notifyScriptPath: string): Record<string, unknown> {
                 hooks: [
                     {
                         type: 'command',
-                        command: `${notifyScriptPath} end`
+                        command: `${cmdPrefix}"${notifyScriptPath}" end`
                     }
                 ]
             }
@@ -1120,7 +1180,7 @@ function getHooksConfig(notifyScriptPath: string): Record<string, unknown> {
                 hooks: [
                     {
                         type: 'command',
-                        command: `${notifyScriptPath} idle`
+                        command: `${cmdPrefix}"${notifyScriptPath}" idle`
                     }
                 ]
             }

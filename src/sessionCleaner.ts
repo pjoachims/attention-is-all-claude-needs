@@ -44,12 +44,17 @@ export class SessionCleaner implements vscode.Disposable {
 
         for (const session of sessions) {
             const pid = this.extractPid(session.id);
-            if (pid !== null && !this.isProcessAlive(pid)) {
-                deadSessionIds.push(session.id);
+            if (pid !== null) {
+                const alive = this.isProcessAlive(pid);
+                console.log(`[SessionCleaner] Checking ${session.id} (PID ${pid}): alive=${alive}`);
+                if (!alive) {
+                    deadSessionIds.push(session.id);
+                }
             }
         }
 
         if (deadSessionIds.length > 0) {
+            console.log(`[SessionCleaner] Removing dead sessions: ${deadSessionIds.join(', ')}`);
             await this.sessionManager.removeSessions(deadSessionIds);
         }
 
@@ -66,9 +71,22 @@ export class SessionCleaner implements vscode.Disposable {
 
     private isProcessAlive(pid: number): boolean {
         try {
-            // Signal 0 checks if process exists without actually sending a signal
-            process.kill(pid, 0);
-            return true;
+            if (process.platform === 'win32') {
+                // On Windows, process.kill(pid, 0) doesn't work reliably
+                // Use synchronous exec to check via tasklist
+                const { execSync } = require('child_process');
+                try {
+                    const result = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+                    // If process exists, tasklist returns a line with the PID
+                    return result.includes(String(pid));
+                } catch {
+                    return false;
+                }
+            } else {
+                // Signal 0 checks if process exists without actually sending a signal
+                process.kill(pid, 0);
+                return true;
+            }
         } catch {
             return false;
         }
