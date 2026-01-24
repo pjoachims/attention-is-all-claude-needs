@@ -1,6 +1,9 @@
-import * as fs from 'fs';
+import { promises as fsPromises } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+// Debug logging - set to true for verbose console output
+const DEBUG = false;
 
 /**
  * Manages session aliases (user-defined names for sessions)
@@ -21,26 +24,27 @@ export class AliasManager {
 
     async load(): Promise<void> {
         try {
-            if (fs.existsSync(this.aliasesFilePath)) {
-                const content = fs.readFileSync(this.aliasesFilePath, 'utf-8');
-                const data = JSON.parse(content) as Record<string, string>;
-                this.aliases = new Map(Object.entries(data));
-            }
+            const content = await fsPromises.readFile(this.aliasesFilePath, 'utf-8');
+            const data = JSON.parse(content) as Record<string, string>;
+            this.aliases = new Map(Object.entries(data));
         } catch (error) {
-            console.error('Failed to load aliases:', error);
+            // File doesn't exist or parse error - start with empty aliases
+            if (DEBUG) {
+                console.error('Failed to load aliases:', error);
+            }
         }
     }
 
     async save(): Promise<void> {
         try {
             const dir = path.dirname(this.aliasesFilePath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
+            await fsPromises.mkdir(dir, { recursive: true });
             const data = Object.fromEntries(this.aliases);
-            fs.writeFileSync(this.aliasesFilePath, JSON.stringify(data, null, 2));
+            await fsPromises.writeFile(this.aliasesFilePath, JSON.stringify(data, null, 2));
         } catch (error) {
-            console.error('Failed to save aliases:', error);
+            if (DEBUG) {
+                console.error('Failed to save aliases:', error);
+            }
         }
     }
 

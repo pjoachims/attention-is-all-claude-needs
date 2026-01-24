@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Debug logging - set to true for verbose console output
+const DEBUG = false;
+
 export class FileWatcher implements vscode.Disposable {
     private watcher: fs.FSWatcher | null = null;
     private debounceTimer: NodeJS.Timeout | null = null;
@@ -36,11 +39,15 @@ export class FileWatcher implements vscode.Disposable {
             });
 
             this.watcher.on('error', (error) => {
-                console.error('File watcher error:', error);
+                if (DEBUG) {
+                    console.error('File watcher error:', error);
+                }
                 this.restartWatcher();
             });
         } catch (error) {
-            console.error('Failed to start file watcher:', error);
+            if (DEBUG) {
+                console.error('Failed to start file watcher:', error);
+            }
         }
     }
 

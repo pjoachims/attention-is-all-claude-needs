@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 
+// Debug logging - set to true for verbose console output
+const DEBUG = false;
+
 /**
  * Watches a directory for any file changes (add, modify, delete).
  * Used for the per-session file storage approach.
@@ -36,11 +39,15 @@ export class DirectoryWatcher implements vscode.Disposable {
             });
 
             this.watcher.on('error', (error) => {
-                console.error('Directory watcher error:', error);
+                if (DEBUG) {
+                    console.error('Directory watcher error:', error);
+                }
                 this.restartWatcher();
             });
         } catch (error) {
-            console.error('Failed to start directory watcher:', error);
+            if (DEBUG) {
+                console.error('Failed to start directory watcher:', error);
+            }
         }
     }
 

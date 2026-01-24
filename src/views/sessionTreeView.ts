@@ -80,14 +80,15 @@ export class SessionItem extends vscode.TreeItem {
     }
 }
 
-export class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem> {
+export class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>, vscode.Disposable {
     private _onDidChangeTreeData = new vscode.EventEmitter<SessionItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+    private readonly disposables: vscode.Disposable[] = [];
 
     constructor(private readonly sessionManager: SessionManager) {
-        sessionManager.onDidChange(() => this.refresh());
+        this.disposables.push(sessionManager.onDidChange(() => this.refresh()));
         // Refresh when terminal associations change
-        terminalTracker.onDidChange(() => this.refresh());
+        this.disposables.push(terminalTracker.onDidChange(() => this.refresh()));
     }
 
     refresh(): void {
@@ -218,5 +219,6 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>
 
     dispose(): void {
         this._onDidChangeTreeData.dispose();
+        this.disposables.forEach(d => d.dispose());
     }
 }

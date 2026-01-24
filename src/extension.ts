@@ -11,8 +11,15 @@ import { SessionCleaner } from './sessionCleaner';
 import { aliasManager } from './aliasManager';
 import { terminalTracker } from './terminalTracker';
 
+// Debug logging - set to true for verbose console output
+const DEBUG = false;
+
 let outputChannel: vscode.OutputChannel;
 let globalSessionManager: SessionManager;
+
+// Cached workspace folders - updated on workspace change
+let cachedWorkspaceFolders: readonly vscode.WorkspaceFolder[] | undefined;
+let cachedWorkspacePaths: string[] = [];
 
 // Focus request file for cross-window communication
 const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'focus-request.json');
@@ -20,6 +27,7 @@ const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'fo
 interface FocusRequest {
     sessionId: string;
     folder: string;
+    vscodeIpcHandle?: string;  // Target window's IPC handle
     timestamp: number;
 }
 
@@ -32,9 +40,25 @@ let sbRunning: vscode.StatusBarItem;
 // Track recently opened terminals for auto-association
 let recentTerminal: { terminal: vscode.Terminal; timestamp: number } | null = null;
 
+// Cache for terminal PIDs - cleared when terminals open/close
+let terminalPidCache: Map<number, vscode.Terminal> | null = null;
+
+// Cache for Windows process chain results - keyed by Claude PID
+// Chain doesn't change for lifetime of a process, so cache for 10 minutes
+const processChainCache = new Map<number, { chain: number[]; timestamp: number }>();
+const PROCESS_CHAIN_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('Claude ATTN');
     outputChannel.appendLine('Claude Code Attention Monitor activated');
+
+    // Initialize workspace folder cache
+    updateWorkspaceFolderCache();
+
+    // Update cache when workspace folders change
+    const workspaceFoldersListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        updateWorkspaceFolderCache();
+    });
 
     const sessionManager = new SessionManager();
     globalSessionManager = sessionManager;
@@ -63,8 +87,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     updateStatusBar(sessionManager);
 
-    // Update status bar when sessions change
-    sessionManager.onDidChange(() => {
+    // Update status bar when sessions change (store disposable to prevent memory leak)
+    const sessionChangeListener = sessionManager.onDidChange(() => {
         updateStatusBar(sessionManager);
 
         // Clean up ended sessions
@@ -76,11 +100,14 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
     });
+    context.subscriptions.push(sessionChangeListener);
 
     // Track when terminals open
     const terminalOpenListener = vscode.window.onDidOpenTerminal((terminal) => {
         outputChannel.appendLine(`Terminal opened: ${terminal.name}`);
         recentTerminal = { terminal, timestamp: Date.now() };
+        // Invalidate terminal PID cache
+        terminalPidCache = null;
     });
 
     // Clean up when terminals close
@@ -93,6 +120,8 @@ export function activate(context: vscode.ExtensionContext) {
         if (recentTerminal?.terminal === terminal) {
             recentTerminal = null;
         }
+        // Invalidate terminal PID cache
+        terminalPidCache = null;
     });
 
     context.subscriptions.push(terminalOpenListener, terminalCloseListener);
@@ -102,10 +131,11 @@ export function activate(context: vscode.ExtensionContext) {
         showCollapseAll: true
     });
 
-    directoryWatcher.onDidChange(async () => {
+    const dirWatcherListener = directoryWatcher.onDidChange(async () => {
         outputChannel.appendLine('Sessions directory changed, reloading...');
         await sessionManager.loadSessions();
     });
+    context.subscriptions.push(dirWatcherListener);
 
     directoryWatcher.start();
     sessionManager.loadSessions();
@@ -292,6 +322,7 @@ export function activate(context: vscode.ExtensionContext) {
         sessionManager,
         directoryWatcher,
         treeView,
+        treeProvider,
         refreshCommand,
         focusSessionCommand,
         manageAssociationsCommand,
@@ -302,10 +333,22 @@ export function activate(context: vscode.ExtensionContext) {
         removeHooksCommand,
         sessionCleaner,
         cleanupCommand,
-        renameSessionCommand
+        renameSessionCommand,
+        workspaceFoldersListener
     );
 
     checkHooksSetup(context);
+}
+
+/**
+ * Update the cached workspace folder paths.
+ */
+function updateWorkspaceFolderCache(): void {
+    cachedWorkspaceFolders = vscode.workspace.workspaceFolders;
+    cachedWorkspacePaths = cachedWorkspaceFolders?.map(f => f.uri.fsPath) ?? [];
+    if (DEBUG) {
+        console.log(`[updateWorkspaceFolderCache] Cached ${cachedWorkspacePaths.length} workspace paths`);
+    }
 }
 
 /**
@@ -316,43 +359,46 @@ function getFilteredSessions(sessionManager: SessionManager): Session[] {
     const allSessions = sessionManager.getAllSessions();
     const globalMode = vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('globalMode', false);
 
-    console.log(`[getFilteredSessions] Total sessions: ${allSessions.length}, globalMode: ${globalMode}`);
+    if (DEBUG) {
+        console.log(`[getFilteredSessions] Total sessions: ${allSessions.length}, globalMode: ${globalMode}`);
+    }
 
     if (globalMode) {
         return allSessions;
     }
 
-    // Filter to sessions within current workspace folders
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-        console.log('[getFilteredSessions] No workspace folders, returning all');
+    // Use cached workspace paths
+    if (cachedWorkspacePaths.length === 0) {
+        if (DEBUG) {
+            console.log('[getFilteredSessions] No workspace folders, returning all');
+        }
         return allSessions; // No workspace, show all
     }
 
-    const workspacePaths = workspaceFolders.map(f => f.uri.fsPath);
-    console.log(`[getFilteredSessions] Workspace paths: ${workspacePaths.join(', ')}`);
-
-    const filtered = allSessions.filter(session => {
+    return allSessions.filter(session => {
         if (!session.cwd) {
-            console.log(`[getFilteredSessions] Session ${session.id} has no cwd`);
             return false;
         }
         // Unescape backslashes from JSON-escaped cwd for comparison
         const normalizedCwd = session.cwd.replace(/\\\\/g, '\\');
-        const matches = workspacePaths.some(wp => normalizedCwd.toLowerCase().startsWith(wp.toLowerCase()));
-        console.log(`[getFilteredSessions] Session ${session.id} cwd: "${session.cwd}" -> normalized: "${normalizedCwd}" -> matches: ${matches}`);
-        return matches;
+        return cachedWorkspacePaths.some(wp => normalizedCwd.toLowerCase().startsWith(wp.toLowerCase()));
     });
-
-    console.log(`[getFilteredSessions] Filtered to ${filtered.length} sessions`);
-    return filtered;
 }
 
 function updateStatusBar(sessionManager: SessionManager): void {
     const sessions = getFilteredSessions(sessionManager);
-    const attention = sessions.filter(s => s.status === 'attention').length;
-    const idle = sessions.filter(s => s.status === 'idle').length;
-    const running = sessions.filter(s => s.status === 'running').length;
+
+    // Count each status in a single pass
+    let attention = 0;
+    let idle = 0;
+    let running = 0;
+    for (const session of sessions) {
+        switch (session.status) {
+            case 'attention': attention++; break;
+            case 'idle': idle++; break;
+            case 'running': running++; break;
+        }
+    }
 
     const globalMode = vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('globalMode', false);
     const modeText = globalMode ? 'Global' : 'Workspace';
@@ -537,15 +583,16 @@ async function focusTerminalForSession(session: Session): Promise<void> {
     // In global mode, check if we need to switch VS Code windows
     if (globalMode && session.cwd) {
         const isInCurrentWorkspace = isSessionInCurrentWorkspace(session);
+        outputChannel.appendLine(`focusTerminalForSession: session=${session.id}, cwd=${session.cwd}, inCurrentWorkspace=${isInCurrentWorkspace}`);
         if (!isInCurrentWorkspace) {
             // Try to switch to the correct VS Code window
-            const switched = await switchToVSCodeWindow(session.cwd, session.id);
+            const switched = await switchToVSCodeWindow(session);
             if (switched) {
                 outputChannel.appendLine(`Switched to VS Code window for ${session.cwd}`);
                 // The other window will handle terminal focus via focus request
                 return;
             } else {
-                outputChannel.appendLine(`Could not switch to VS Code window for ${session.cwd}`);
+                outputChannel.appendLine(`Could not switch to VS Code window for ${session.cwd} - falling back to current window`);
                 // Fall through to try terminal focus in current window anyway
             }
         }
@@ -566,21 +613,21 @@ async function focusTerminalForSession(session: Session): Promise<void> {
         return;
     }
 
-    // Try PID-based matching by walking up the process tree
-    const matched = await matchSessionToTerminal(session, terminals);
-    if (matched) {
-        terminalTracker.associate(session.id, matched);
-        outputChannel.appendLine(`PID match: session ${session.id} → terminal "${matched.name}"`);
-        matched.show();
-        await clearAttentionIfNeeded(session);
-        return;
-    }
-
-    // Only one terminal - associate and use it
+    // Only one terminal - use it directly (skip PID matching)
     if (terminals.length === 1) {
         terminalTracker.associate(session.id, terminals[0]);
         outputChannel.appendLine(`Auto-associated session ${session.id} with only terminal ${terminals[0].name}`);
         terminals[0].show();
+        await clearAttentionIfNeeded(session);
+        return;
+    }
+
+    // Multiple terminals - use terminalPid for fast matching
+    const matched = await matchSessionToTerminal(session, terminals);
+    if (matched) {
+        terminalTracker.associate(session.id, matched);
+        outputChannel.appendLine(`Matched session ${session.id} → terminal "${matched.name}"`);
+        matched.show();
         await clearAttentionIfNeeded(session);
         return;
     }
@@ -616,43 +663,146 @@ async function clearAttentionIfNeeded(session: Session): Promise<void> {
 }
 
 /**
- * Match a session to a terminal by walking up the process tree.
- * Returns the matching terminal or undefined.
+ * Get or refresh the terminal PID cache.
  */
-async function matchSessionToTerminal(
-    session: Session,
-    terminals: readonly vscode.Terminal[]
-): Promise<vscode.Terminal | undefined> {
-    const claudePid = extractPidFromSessionId(session.id);
-    if (claudePid === null) {
-        return undefined;
+async function getTerminalPidMap(terminals: readonly vscode.Terminal[]): Promise<Map<number, vscode.Terminal>> {
+    if (terminalPidCache !== null) {
+        return terminalPidCache;
     }
 
-    // Get all terminal PIDs
-    const terminalPids = new Map<number, vscode.Terminal>();
+    const pidMap = new Map<number, vscode.Terminal>();
     for (const terminal of terminals) {
         try {
             const pid = await terminal.processId;
             if (pid !== undefined) {
-                terminalPids.set(pid, terminal);
+                pidMap.set(pid, terminal);
             }
         } catch {
             // Terminal might have closed
         }
     }
 
-    // Walk up the process tree from Claude's PID
-    let currentPid: number | null = claudePid;
-    const maxDepth = 10; // Prevent infinite loops
-    for (let i = 0; i < maxDepth && currentPid !== null && currentPid > 1; i++) {
-        const terminal = terminalPids.get(currentPid);
+    terminalPidCache = pidMap;
+    return pidMap;
+}
+
+/**
+ * Match a session to a terminal using terminalPid from session JSON.
+ * Falls back to process tree walking for old sessions without terminalPid.
+ */
+async function matchSessionToTerminal(
+    session: Session,
+    terminals: readonly vscode.Terminal[]
+): Promise<vscode.Terminal | undefined> {
+    // Build terminal PID map
+    const terminalPids = await getTerminalPidMap(terminals);
+
+    // Fast path: use terminalPid directly if available
+    if (session.terminalPid) {
+        const terminal = terminalPids.get(session.terminalPid);
+        if (terminal) {
+            outputChannel.appendLine(`Direct terminalPid match: ${session.terminalPid}`);
+            return terminal;
+        }
+    }
+
+    // Fallback for old sessions: walk the process tree
+    const claudePid = extractPidFromSessionId(session.id);
+    if (claudePid === null) {
+        return undefined;
+    }
+
+    outputChannel.appendLine(`Falling back to process tree walk for session ${session.id}`);
+    const ancestorChain = await getProcessChain(claudePid);
+
+    for (const pid of ancestorChain) {
+        const terminal = terminalPids.get(pid);
         if (terminal) {
             return terminal;
         }
-        currentPid = await getParentPid(currentPid);
     }
 
     return undefined;
+}
+
+/**
+ * Get the ancestor chain for a PID, with caching.
+ * Process chains don't change, so we cache for 10 minutes.
+ */
+async function getProcessChain(startPid: number): Promise<number[]> {
+    // Check cache first
+    const cached = processChainCache.get(startPid);
+    if (cached && Date.now() - cached.timestamp < PROCESS_CHAIN_CACHE_TTL) {
+        if (DEBUG) {
+            console.log(`[getProcessChain] Cache hit for PID ${startPid}`);
+        }
+        return cached.chain;
+    }
+
+    // Compute chain based on platform
+    const chain = process.platform === 'win32'
+        ? await getWindowsProcessChain(startPid)
+        : await getUnixProcessChain(startPid);
+
+    // Cache the result
+    processChainCache.set(startPid, { chain, timestamp: Date.now() });
+
+    if (DEBUG) {
+        console.log(`[getProcessChain] Cached chain for PID ${startPid}: ${chain.join(' -> ')}`);
+    }
+
+    return chain;
+}
+
+/**
+ * Get ancestor chain on Unix/macOS using ps command.
+ */
+async function getUnixProcessChain(startPid: number): Promise<number[]> {
+    const chain: number[] = [];
+    let currentPid: number | null = startPid;
+    const maxDepth = 10;
+
+    for (let i = 0; i < maxDepth && currentPid !== null && currentPid > 1; i++) {
+        chain.push(currentPid);
+        currentPid = await getParentPid(currentPid);
+    }
+
+    return chain;
+}
+
+/**
+ * Get the ancestor chain for a specific PID on Windows.
+ * Uses bulk query (~600ms) then walks in memory, discards bulk data after.
+ * Returns array of PIDs from the given PID up to the root.
+ */
+async function getWindowsProcessChain(startPid: number): Promise<number[]> {
+    return new Promise((resolve) => {
+        // Bulk query all processes, walk chain in PowerShell, return only the chain
+        // This is faster than per-PID queries (~600ms vs ~1800ms)
+        // The bulk data is discarded after - only the small chain array is returned
+        // Note: Must cast to [int] because ProcessId is UInt32 but hashtable lookup uses Int32
+        const cmd = `powershell -NoProfile -Command "$procs=@{}; Get-CimInstance Win32_Process | ForEach-Object { $procs[[int]$_.ProcessId]=[int]$_.ParentProcessId }; $id=${startPid}; $chain=@(); while($id -and $id -gt 0 -and $procs.ContainsKey($id)) { $chain+=$id; $id=$procs[$id] }; $chain -join ','"`;
+
+        exec(cmd, { timeout: 10000 }, (error, stdout) => {
+            if (error) {
+                if (DEBUG) {
+                    console.log('[getWindowsProcessChain] PowerShell failed:', error.message);
+                }
+                resolve([startPid]); // Return at least the starting PID
+                return;
+            }
+
+            // Parse comma-separated PIDs
+            const chain = stdout.trim().split(',')
+                .map(s => parseInt(s.trim(), 10))
+                .filter(n => !isNaN(n) && n > 0);
+
+            if (DEBUG) {
+                console.log(`[getWindowsProcessChain] Chain for ${startPid}: ${chain.join(' -> ')}`);
+            }
+            resolve(chain.length > 0 ? chain : [startPid]);
+        });
+    });
 }
 
 /**
@@ -744,13 +894,21 @@ function isFolderInCurrentWorkspace(folderPath: string): boolean {
         return false;
     }
 
-    return workspaceFolders.some(f =>
-        folderPath.startsWith(f.uri.fsPath) || f.uri.fsPath.startsWith(folderPath)
-    );
+    // Normalize paths for comparison (Windows uses backslashes, git uses forward slashes)
+    const normalizedFolder = folderPath.replace(/\//g, '\\').toLowerCase();
+
+    for (const f of workspaceFolders) {
+        const normalizedWorkspace = f.uri.fsPath.toLowerCase();
+        if (normalizedFolder.startsWith(normalizedWorkspace) || normalizedWorkspace.startsWith(normalizedFolder)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
  * Handle incoming focus request from another VS Code window.
+ * Uses IPC handle to identify if this window should handle the request.
  */
 async function handleIncomingFocusRequest(sessionManager: SessionManager): Promise<void> {
     try {
@@ -767,13 +925,29 @@ async function handleIncomingFocusRequest(sessionManager: SessionManager): Promi
             return;
         }
 
-        // Check if this folder belongs to our workspace
-        if (!isFolderInCurrentWorkspace(request.folder)) {
-            outputChannel.appendLine(`Focus request not for this workspace: ${request.folder}`);
-            return;
+        // Check if this request is for us by matching IPC handle
+        const myIpcHandle = process.env.VSCODE_GIT_IPC_HANDLE;
+        if (request.vscodeIpcHandle && myIpcHandle) {
+            if (request.vscodeIpcHandle !== myIpcHandle) {
+                outputChannel.appendLine(`Focus request not for this window (IPC mismatch)`);
+                return;
+            }
+        } else {
+            // Fallback to folder matching if no IPC handle
+            if (!isFolderInCurrentWorkspace(request.folder)) {
+                outputChannel.appendLine(`Focus request not for this workspace: ${request.folder}`);
+                return;
+            }
         }
 
-        outputChannel.appendLine(`Handling focus request for session ${request.sessionId} in ${request.folder}`);
+        outputChannel.appendLine(`Handling focus request for session ${request.sessionId}`);
+
+        // Clear the request file first (we're handling it)
+        try {
+            fs.unlinkSync(FOCUS_REQUEST_FILE);
+        } catch {
+            // Ignore - another window might have already handled it
+        }
 
         // Find the session
         const session = sessionManager.getAllSessions().find(s => s.id === request.sessionId);
@@ -782,8 +956,11 @@ async function handleIncomingFocusRequest(sessionManager: SessionManager): Promi
             return;
         }
 
-        // Focus this window
-        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        // Activate our window (bring to foreground)
+        if (process.platform === 'win32') {
+            const folderName = path.basename(request.folder);
+            await activateWindowByFolder(folderName);
+        }
 
         // Focus the terminal for this session
         const terminals = vscode.window.terminals;
@@ -791,20 +968,19 @@ async function handleIncomingFocusRequest(sessionManager: SessionManager): Promi
             return;
         }
 
-        // Try PID matching
+        // Try terminal matching
         const matched = await matchSessionToTerminal(session, terminals);
         if (matched) {
             terminalTracker.associate(session.id, matched);
-            outputChannel.appendLine(`Focus request: PID match → terminal "${matched.name}"`);
-            matched.show();
+            outputChannel.appendLine(`Focus request: matched terminal "${matched.name}"`);
+            matched.show(false); // false = take focus
+            await vscode.commands.executeCommand('workbench.action.terminal.focus');
             await clearAttentionIfNeeded(session);
         } else if (terminals.length === 1) {
-            terminals[0].show();
+            terminals[0].show(false);
+            await vscode.commands.executeCommand('workbench.action.terminal.focus');
             await clearAttentionIfNeeded(session);
         }
-
-        // Clear the request file
-        fs.unlinkSync(FOCUS_REQUEST_FILE);
     } catch (error) {
         outputChannel.appendLine(`Error handling focus request: ${error}`);
     }
@@ -813,10 +989,11 @@ async function handleIncomingFocusRequest(sessionManager: SessionManager): Promi
 /**
  * Write a focus request for another window to pick up.
  */
-function writeFocusRequest(sessionId: string, folder: string): void {
+function writeFocusRequest(sessionId: string, folder: string, vscodeIpcHandle?: string): void {
     const request: FocusRequest = {
         sessionId,
         folder,
+        vscodeIpcHandle,
         timestamp: Date.now()
     };
 
@@ -875,21 +1052,59 @@ async function getGitRoot(folderPath: string): Promise<string | null> {
 }
 
 /**
- * Switch to the VS Code window that has the given folder open.
- * Uses git root to find the actual workspace folder, writes a focus request,
- * then opens a file to trigger the window switch.
+ * Activate a VS Code window by folder name in title (Windows only).
+ * Uses PowerShell script with Win32 API to enumerate windows and find match.
  */
-async function switchToVSCodeWindow(folderPath: string, sessionId: string): Promise<boolean> {
-    // First try to find the git root - this is likely the workspace folder
+async function activateWindowByFolder(folderName: string): Promise<boolean> {
+    if (process.platform !== 'win32') {
+        return false;
+    }
+
+    const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-vscode-window.ps1');
+
+    return new Promise((resolve) => {
+        const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -FolderName "${folderName}"`;
+
+        exec(cmd, { timeout: 3000 }, (error: Error | null, stdout: string) => {
+            if (error) {
+                outputChannel.appendLine(`activateWindowByFolder error: ${error.message}`);
+                resolve(false);
+                return;
+            }
+            const success = stdout.toLowerCase().includes('true');
+            outputChannel.appendLine(`activateWindowByFolder(${folderName}): ${success}`);
+            resolve(success);
+        });
+    });
+}
+
+/**
+ * Switch to the VS Code window for the given session.
+ * Uses vscodePid if available (fast), falls back to code command.
+ */
+async function switchToVSCodeWindow(session: Session): Promise<boolean> {
+    const folderPath = session.cwd!;
     const gitRoot = await getGitRoot(folderPath);
     const targetPath = gitRoot || folderPath;
+    const folderName = path.basename(targetPath);
 
-    outputChannel.appendLine(`switchToVSCodeWindow: cwd=${folderPath}, gitRoot=${gitRoot}, using=${targetPath}`);
+    outputChannel.appendLine(`switchToVSCodeWindow: session=${session.id}, folder=${folderName}, ipc=${session.vscodeIpcHandle}`);
 
-    // Write focus request so the target window knows to focus the terminal
-    writeFocusRequest(sessionId, targetPath);
+    // Write focus request with IPC handle - target window will identify itself and handle activation
+    writeFocusRequest(session.id, targetPath, session.vscodeIpcHandle);
 
-    // Find a file to open (this triggers window focus)
+    // The target window will activate itself when it receives the focus request.
+    // But we also try to activate it from here for faster response.
+    if (process.platform === 'win32') {
+        const activated = await activateWindowByFolder(folderName);
+        if (activated) {
+            outputChannel.appendLine(`Window activated via folder name "${folderName}"`);
+            return true;
+        }
+        outputChannel.appendLine(`Folder activation failed, falling back to code command`);
+    }
+
+    // Fallback: Find a file to open (this triggers window focus)
     const fileToOpen = await findFileToOpen(targetPath);
     if (!fileToOpen) {
         outputChannel.appendLine(`No file found to open in ${targetPath}`);
@@ -897,8 +1112,11 @@ async function switchToVSCodeWindow(folderPath: string, sessionId: string): Prom
     }
 
     return new Promise((resolve) => {
-        // Open the file - this focuses the window that has it
-        exec(`code "${fileToOpen}"`, (error: Error | null) => {
+        const cmd = process.platform === 'win32'
+            ? `cmd.exe /c start /min code "${fileToOpen}"`
+            : `code "${fileToOpen}"`;
+
+        exec(cmd, { timeout: 5000 }, (error: Error | null) => {
             if (error) {
                 outputChannel.appendLine(`code command error: ${error.message}`);
                 resolve(false);
@@ -911,6 +1129,9 @@ async function switchToVSCodeWindow(folderPath: string, sessionId: string): Prom
 }
 
 async function checkHooksSetup(context: vscode.ExtensionContext): Promise<void> {
+    // Always deploy/update scripts on activation (handles extension updates)
+    await deployScripts();
+
     const hasSetupHooks = context.globalState.get<boolean>('hasSetupHooks', false);
 
     if (!hasSetupHooks) {
@@ -926,6 +1147,62 @@ async function checkHooksSetup(context: vscode.ExtensionContext): Promise<void> 
         } else if (result === "Don't Ask Again") {
             await context.globalState.update('hasSetupHooks', true);
         }
+    }
+}
+
+/**
+ * Deploy notification scripts to ~/.claude/claude-attn/.
+ * Called on every activation to ensure scripts are up-to-date after extension updates.
+ */
+async function deployScripts(): Promise<void> {
+    const claudeDir = path.join(os.homedir(), '.claude');
+    const monitorDir = path.join(claudeDir, 'claude-attn');
+    const sessionsDir = path.join(monitorDir, 'sessions');
+
+    const isWindows = process.platform === 'win32';
+    const scriptExt = isWindows ? '.cmd' : '.sh';
+    const notifyScriptPath = path.join(monitorDir, `notify${scriptExt}`);
+
+    try {
+        if (!fs.existsSync(sessionsDir)) {
+            fs.mkdirSync(sessionsDir, { recursive: true });
+        }
+
+        // Clean up old/wrong-platform scripts
+        const oldScriptExt = isWindows ? '.sh' : '.cmd';
+        const oldNotifyScript = path.join(monitorDir, `notify${oldScriptExt}`);
+        if (fs.existsSync(oldNotifyScript)) {
+            fs.unlinkSync(oldNotifyScript);
+            outputChannel.appendLine(`Removed old script: ${oldNotifyScript}`);
+        }
+
+        // On non-Windows, remove PowerShell scripts that aren't needed
+        if (!isWindows) {
+            const psScripts = ['get-claude-pid.ps1', 'activate-vscode-window.ps1'];
+            for (const script of psScripts) {
+                const scriptPath = path.join(monitorDir, script);
+                if (fs.existsSync(scriptPath)) {
+                    fs.unlinkSync(scriptPath);
+                    outputChannel.appendLine(`Removed unneeded script: ${scriptPath}`);
+                }
+            }
+        }
+
+        const notifyScript = isWindows ? getNotifyScriptWindows() : getNotifyScriptUnix();
+        fs.writeFileSync(notifyScriptPath, notifyScript, { mode: isWindows ? 0o644 : 0o755 });
+
+        // On Windows, also deploy the PowerShell helper scripts
+        if (isWindows) {
+            const psScriptPath = path.join(monitorDir, 'get-claude-pid.ps1');
+            fs.writeFileSync(psScriptPath, getClaudePidScript());
+
+            const activateScriptPath = path.join(monitorDir, 'activate-vscode-window.ps1');
+            fs.writeFileSync(activateScriptPath, getActivateWindowScript());
+        }
+
+        outputChannel.appendLine(`Scripts deployed to ${monitorDir}`);
+    } catch (error) {
+        outputChannel.appendLine(`Error deploying scripts: ${error}`);
     }
 }
 
@@ -947,10 +1224,13 @@ async function setupClaudeHooks(context: vscode.ExtensionContext): Promise<void>
         const notifyScript = isWindows ? getNotifyScriptWindows() : getNotifyScriptUnix();
         fs.writeFileSync(notifyScriptPath, notifyScript, { mode: isWindows ? 0o644 : 0o755 });
 
-        // On Windows, also deploy the PowerShell helper script
+        // On Windows, also deploy the PowerShell helper scripts
         if (isWindows) {
             const psScriptPath = path.join(monitorDir, 'get-claude-pid.ps1');
             fs.writeFileSync(psScriptPath, getClaudePidScript());
+
+            const activateScriptPath = path.join(monitorDir, 'activate-vscode-window.ps1');
+            fs.writeFileSync(activateScriptPath, getActivateWindowScript());
         }
 
         let settings: Record<string, unknown> = {};
@@ -1036,28 +1316,41 @@ function getNotifyScriptUnix(): string {
 ACTION="$1"
 REASON="\${2:-permission_prompt}"
 CWD="\${CLAUDE_WORKING_DIRECTORY:-$(pwd)}"
-SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-$PPID}"
 SESSIONS_DIR=~/.claude/claude-attn/sessions
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Get PIDs: Claude (PPID of this script), Terminal (Claude's parent)
+CLAUDE_PID=$PPID
+TERMINAL_PID=$(ps -o ppid= -p $CLAUDE_PID 2>/dev/null | tr -d ' ')
+SESSION_ID="\${CLAUDE_SESSION_ID:-ppid-$CLAUDE_PID}"
+
+# VS Code IPC handle - unique per VS Code window
+IPC_HANDLE="\${VSCODE_GIT_IPC_HANDLE:-}"
+
+# Build extra fields for JSON
+EXTRA_FIELDS=""
+[[ -n "$CLAUDE_PID" ]] && EXTRA_FIELDS=",\\"claudePid\\":$CLAUDE_PID"
+[[ -n "$TERMINAL_PID" ]] && EXTRA_FIELDS="$EXTRA_FIELDS,\\"terminalPid\\":$TERMINAL_PID"
+[[ -n "$IPC_HANDLE" ]] && EXTRA_FIELDS="$EXTRA_FIELDS,\\"vscodeIpcHandle\\":\\"$IPC_HANDLE\\""
 
 mkdir -p "$SESSIONS_DIR"
 SESSION_FILE="$SESSIONS_DIR/$SESSION_ID.json"
 
 case "$ACTION" in
     attention)
-        printf '{"id":"%s","status":"attention","reason":"%s","cwd":"%s","lastUpdate":"%s"}' \\
-            "$SESSION_ID" "$REASON" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
+        printf '{"id":"%s","status":"attention","reason":"%s","cwd":"%s","lastUpdate":"%s"%s}' \\
+            "$SESSION_ID" "$REASON" "$CWD" "$TIMESTAMP" "$EXTRA_FIELDS" > "$SESSION_FILE"
         ;;
     start)
-        printf '{"id":"%s","status":"running","cwd":"%s","lastUpdate":"%s"}' \\
-            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
+        printf '{"id":"%s","status":"running","cwd":"%s","lastUpdate":"%s"%s}' \\
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" "$EXTRA_FIELDS" > "$SESSION_FILE"
         ;;
     end)
         rm -f "$SESSION_FILE"
         ;;
     idle)
-        printf '{"id":"%s","status":"idle","cwd":"%s","lastUpdate":"%s"}' \\
-            "$SESSION_ID" "$CWD" "$TIMESTAMP" > "$SESSION_FILE"
+        printf '{"id":"%s","status":"idle","cwd":"%s","lastUpdate":"%s"%s}' \\
+            "$SESSION_ID" "$CWD" "$TIMESTAMP" "$EXTRA_FIELDS" > "$SESSION_FILE"
         ;;
 esac
 `;
@@ -1074,16 +1367,22 @@ if "%REASON%"=="" set "REASON=permission_prompt"
 :: Set PS script path first (before any if blocks for proper variable expansion)
 set "PS_SCRIPT=%USERPROFILE%\\.claude\\claude-attn\\get-claude-pid.ps1"
 
+set "SESSION_ID="
+set "CLAUDE_PID="
+set "TERMINAL_PID="
+
+:: Get Claude PID and Terminal PID via PowerShell helper script
+for /f "usebackq tokens=1,2 delims=," %%A in (\`powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"\`) do (
+    set "CLAUDE_PID=%%A"
+    set "TERMINAL_PID=%%B"
+)
+
 if defined CLAUDE_SESSION_ID (
     set "SESSION_ID=%CLAUDE_SESSION_ID%"
+) else if defined CLAUDE_PID (
+    set "SESSION_ID=ppid-!CLAUDE_PID!"
 ) else (
-    set "SESSION_ID="
-    :: Get Claude Code's PID via PowerShell helper script
-    for /f "usebackq delims=" %%P in (\`powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"\`) do (
-        set "SESSION_ID=ppid-%%P"
-    )
-    :: Fallback to random if PowerShell fails
-    if "!SESSION_ID!"=="" set "SESSION_ID=win-%RANDOM%%RANDOM%"
+    set "SESSION_ID=win-%RANDOM%%RANDOM%"
 )
 
 if defined CLAUDE_WORKING_DIRECTORY (
@@ -1094,6 +1393,11 @@ if defined CLAUDE_WORKING_DIRECTORY (
 :: Escape backslashes for JSON
 set "CWD=!CWD:\\=\\\\!"
 
+:: VS Code IPC handle - unique per VS Code window
+set "IPC_HANDLE=%VSCODE_GIT_IPC_HANDLE%"
+:: Escape backslashes in IPC handle for JSON
+set "IPC_HANDLE=!IPC_HANDLE:\\=\\\\!"
+
 set "SESSIONS_DIR=%USERPROFILE%\\.claude\\claude-attn\\sessions"
 if not exist "%SESSIONS_DIR%" mkdir "%SESSIONS_DIR%"
 set "SESSION_FILE=%SESSIONS_DIR%\\!SESSION_ID!.json"
@@ -1102,22 +1406,31 @@ set "SESSION_FILE=%SESSIONS_DIR%\\!SESSION_ID!.json"
 for /f "usebackq delims=" %%T in (\`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'"\`) do set "TIMESTAMP=%%T"
 if not defined TIMESTAMP set "TIMESTAMP=unknown"
 
+:: Build extra fields for JSON
+set "EXTRA_FIELDS="
+if defined CLAUDE_PID if not "!CLAUDE_PID!"=="" set EXTRA_FIELDS=,"claudePid":!CLAUDE_PID!
+if defined TERMINAL_PID if not "!TERMINAL_PID!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"terminalPid":!TERMINAL_PID!
+if defined IPC_HANDLE if not "!IPC_HANDLE!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"vscodeIpcHandle":"!IPC_HANDLE!"
+
 if "%ACTION%"=="attention" (
-    echo {"id":"!SESSION_ID!","status":"attention","reason":"%REASON%","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"attention","reason":"%REASON%","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"!EXTRA_FIELDS!}>"%SESSION_FILE%"
 ) else if "%ACTION%"=="start" (
-    echo {"id":"!SESSION_ID!","status":"running","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"running","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"!EXTRA_FIELDS!}>"%SESSION_FILE%"
 ) else if "%ACTION%"=="end" (
     if exist "%SESSION_FILE%" del "%SESSION_FILE%"
 ) else if "%ACTION%"=="idle" (
-    echo {"id":"!SESSION_ID!","status":"idle","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"}>"%SESSION_FILE%"
+    echo {"id":"!SESSION_ID!","status":"idle","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"!EXTRA_FIELDS!}>"%SESSION_FILE%"
 )
 `;
 }
 
 function getClaudePidScript(): string {
-    return `# Walk up the process tree to find Claude Code (node.exe or claude.exe)
+    return `# Walk up process tree to find Claude PID and Terminal PID
+# Output format: claudePid,terminalPid
 $currentPid = $PID
-$maxLevels = 10
+$maxLevels = 15
+$claudePid = ""
+$terminalPid = ""
 
 for ($i = 0; $i -lt $maxLevels; $i++) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction SilentlyContinue
@@ -1128,13 +1441,145 @@ for ($i = 0; $i -lt $maxLevels; $i++) {
     if (-not $parentProc) { break }
 
     # Check if parent is node.exe or claude.exe (Claude Code)
-    if ($parentProc.Name -eq "node.exe" -or $parentProc.Name -eq "claude.exe") {
-        Write-Host $parentPid
-        exit 0
+    if (-not $claudePid -and ($parentProc.Name -eq "node.exe" -or $parentProc.Name -eq "claude.exe")) {
+        $claudePid = $parentPid
+    }
+    # Once we found Claude, the next shell-like process is the terminal
+    elseif ($claudePid -and -not $terminalPid) {
+        # Terminal is typically cmd.exe, powershell.exe, pwsh.exe, or bash.exe
+        if ($parentProc.Name -match "^(cmd|powershell|pwsh|bash|zsh|fish|sh)\\.exe$") {
+            $terminalPid = $parentPid
+            break  # Found both, we're done
+        }
+    }
+
+    # Check if parent is Code.exe - use current as terminal if we haven't found one
+    if ($parentProc.Name -eq "Code.exe") {
+        if (-not $terminalPid -and $claudePid) {
+            $terminalPid = $currentPid
+        }
+        break
     }
 
     $currentPid = $parentPid
 }
+
+# Output both PIDs (comma-separated)
+Write-Host "$claudePid,$terminalPid"
+`;
+}
+
+function getActivateWindowScript(): string {
+    return `# Activate VS Code window by folder name in title
+# Usage: activate-vscode-window.ps1 -FolderName "my-project"
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$FolderName
+)
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class WindowActivator {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    public const int SW_RESTORE = 9;
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);  // Returns true if minimized
+
+    private static IntPtr foundHwnd = IntPtr.Zero;
+    private static string searchTerm = "";
+
+    public static IntPtr FindWindowByTitleContains(string term) {
+        foundHwnd = IntPtr.Zero;
+        searchTerm = term.ToLower();
+
+        EnumWindows((hWnd, lParam) => {
+            if (IsWindowVisible(hWnd)) {
+                var sb = new StringBuilder(256);
+                GetWindowText(hWnd, sb, 256);
+                string title = sb.ToString().ToLower();
+
+                if (title.Contains("visual studio code") && title.Contains(searchTerm)) {
+                    foundHwnd = hWnd;
+                    return false;
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        return foundHwnd;
+    }
+
+    public static bool ActivateWindow(IntPtr hWnd) {
+        if (hWnd == IntPtr.Zero) return false;
+
+        IntPtr foregroundHwnd = GetForegroundWindow();
+        uint dummy;
+        uint foregroundThread = GetWindowThreadProcessId(foregroundHwnd, out dummy);
+        uint currentThread = GetCurrentThreadId();
+
+        bool attached = false;
+        if (foregroundThread != currentThread) {
+            attached = AttachThreadInput(currentThread, foregroundThread, true);
+        }
+
+        try {
+            // Only restore if minimized - don't change maximized/normal state
+            if (IsIconic(hWnd)) {
+                ShowWindow(hWnd, SW_RESTORE);
+            }
+            return SetForegroundWindow(hWnd);
+        }
+        finally {
+            if (attached) {
+                AttachThreadInput(currentThread, foregroundThread, false);
+            }
+        }
+    }
+}
+"@
+
+$hwnd = [WindowActivator]::FindWindowByTitleContains($FolderName)
+
+if ($hwnd -eq [IntPtr]::Zero) {
+    Write-Output "NotFound"
+    exit 1
+}
+
+$result = [WindowActivator]::ActivateWindow($hwnd)
+Write-Output $result
 `;
 }
 

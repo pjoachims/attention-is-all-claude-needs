@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
-import * as fs from 'fs';
+import { promises as fsPromises } from 'fs';
+
+// Debug logging - set to true for verbose console output
+const DEBUG = false;
 
 export type SessionStatus = 'attention' | 'running' | 'idle';
 
@@ -11,6 +14,9 @@ export interface Session {
     reason?: string;
     cwd?: string;
     lastUpdate: string;
+    claudePid?: number;      // Claude process PID
+    terminalPid?: number;    // Terminal shell PID (for fast terminal matching)
+    vscodeIpcHandle?: string; // VS Code IPC handle (unique per window, for cross-window switching)
 }
 
 export class SessionManager {
@@ -37,38 +43,58 @@ export class SessionManager {
         try {
             this.sessions.clear();
 
-            console.log(`[SessionManager] Loading from: ${this.sessionsDirPath}`);
-            console.log(`[SessionManager] Directory exists: ${fs.existsSync(this.sessionsDirPath)}`);
+            if (DEBUG) {
+                console.log(`[SessionManager] Loading from: ${this.sessionsDirPath}`);
+            }
 
-            if (!fs.existsSync(this.sessionsDirPath)) {
-                fs.mkdirSync(this.sessionsDirPath, { recursive: true });
+            // Create directory if it doesn't exist
+            try {
+                await fsPromises.access(this.sessionsDirPath);
+            } catch {
+                await fsPromises.mkdir(this.sessionsDirPath, { recursive: true });
                 this._onDidChange.fire();
                 return;
             }
 
-            const files = fs.readdirSync(this.sessionsDirPath);
-            console.log(`[SessionManager] Found ${files.length} files: ${files.join(', ')}`);
+            const files = await fsPromises.readdir(this.sessionsDirPath);
+            const jsonFiles = files.filter(f => f.endsWith('.json'));
 
-            for (const file of files) {
-                if (!file.endsWith('.json')) {continue;}
+            if (DEBUG) {
+                console.log(`[SessionManager] Found ${jsonFiles.length} JSON files`);
+            }
 
+            // Read all files in parallel
+            const readPromises = jsonFiles.map(async (file) => {
                 try {
                     const filePath = path.join(this.sessionsDirPath, file);
-                    const content = fs.readFileSync(filePath, 'utf-8');
+                    const content = await fsPromises.readFile(filePath, 'utf-8');
                     const session: Session = JSON.parse(content);
                     if (session.id && session.status) {
-                        this.sessions.set(session.id, session);
-                        console.log(`[SessionManager] Loaded session: ${session.id} (${session.status})`);
+                        return session;
                     }
                 } catch (e) {
-                    console.error(`[SessionManager] Failed to parse ${file}:`, e);
+                    if (DEBUG) {
+                        console.error(`[SessionManager] Failed to parse ${file}:`, e);
+                    }
+                }
+                return null;
+            });
+
+            const results = await Promise.all(readPromises);
+            for (const session of results) {
+                if (session) {
+                    this.sessions.set(session.id, session);
                 }
             }
 
-            console.log(`[SessionManager] Total sessions loaded: ${this.sessions.size}`);
+            if (DEBUG) {
+                console.log(`[SessionManager] Total sessions loaded: ${this.sessions.size}`);
+            }
             this._onDidChange.fire();
         } catch (error) {
-            console.error('[SessionManager] Failed to load sessions:', error);
+            if (DEBUG) {
+                console.error('[SessionManager] Failed to load sessions:', error);
+            }
             this.sessions.clear();
             this._onDidChange.fire();
         }
@@ -79,31 +105,44 @@ export class SessionManager {
     }
 
     async removeSessions(sessionIds: string[]): Promise<void> {
-        for (const id of sessionIds) {
+        // Delete files in parallel (async, non-blocking)
+        await Promise.all(sessionIds.map(async (id) => {
             const filePath = path.join(this.sessionsDirPath, `${id}.json`);
             try {
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
-                }
+                await fsPromises.unlink(filePath);
             } catch {
-                // Ignore errors
+                // File may not exist, ignore
             }
+        }));
+
+        // Update in-memory map directly instead of full reload
+        for (const id of sessionIds) {
+            this.sessions.delete(id);
         }
-        await this.loadSessions();
+        this._onDidChange.fire();
     }
 
     async updateSessionStatus(sessionId: string, status: SessionStatus): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (!session) {return;}
 
-        session.status = status;
-        session.reason = undefined;
-        session.lastUpdate = new Date().toISOString();
+        // Update the session in-memory
+        const updatedSession: Session = {
+            ...session,
+            status,
+            reason: undefined,
+            lastUpdate: new Date().toISOString()
+        };
 
+        // Update the Map directly - no need to reload all sessions
+        this.sessions.set(sessionId, updatedSession);
+
+        // Write to file asynchronously
         const filePath = path.join(this.sessionsDirPath, `${sessionId}.json`);
-        fs.writeFileSync(filePath, JSON.stringify(session));
+        await fsPromises.writeFile(filePath, JSON.stringify(updatedSession));
 
-        await this.loadSessions();
+        // Fire change event
+        this._onDidChange.fire();
     }
 
     private isFilteringEnabled(): boolean {
