@@ -14,7 +14,6 @@ export interface Session {
     reason?: string;
     cwd?: string;
     lastUpdate: string;
-    claudePid?: number;      // Claude process PID
     terminalPid?: number;    // Terminal shell PID (for fast terminal matching)
     vscodeIpcHandle?: string; // VS Code IPC handle (unique per window, for cross-window switching)
 }
@@ -26,8 +25,8 @@ export class SessionManager {
 
     private readonly sessionsDirPath: string;
 
-    constructor() {
-        this.sessionsDirPath = path.join(
+    constructor(sessionsDirPath?: string) {
+        this.sessionsDirPath = sessionsDirPath ?? path.join(
             os.homedir(),
             '.claude',
             'claude-attn',

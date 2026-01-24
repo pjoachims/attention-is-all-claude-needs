@@ -1,0 +1,8 @@
+{
+  "id": "ppid-12345",
+  "status": "attention",
+  "reason": "permission_prompt",
+  "cwd": "/home/user/project",
+  "terminalPid": 12344,
+  "lastUpdate": "2024-01-15T10:30:00.000Z"
+}

@@ -119,17 +119,32 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile",
+    "pretest": "npm run compile && npm run compile:tests",
+    "compile:tests": "tsc -p ./tsconfig.test.json",
     "lint": "eslint src --ext ts",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "npm run test:unit",
+    "test:unit": "mocha --config .mocharc.json",
+    "test:integration": "vscode-test",
+    "test:coverage": "c8 npm run test:unit"
   },
   "devDependencies": {
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
     "@types/node": "^20.10.0",
+    "@types/sinon": "^17.0.3",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",
+    "@vscode/test-cli": "^0.0.6",
+    "@vscode/test-electron": "^2.3.8",
     "@vscode/vsce": "^3.2.0",
+    "c8": "^9.0.0",
+    "chai": "^4.3.10",
     "eslint": "^8.54.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "sinon": "^17.0.1",
     "typescript": "^5.3.0"
   }
 }

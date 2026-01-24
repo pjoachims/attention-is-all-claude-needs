@@ -1,0 +1,9 @@
+{
+  "spec": "out/src/test/unit/**/*.test.js",
+  "require": [
+    "out/src/test/mocks/setup.js"
+  ],
+  "timeout": 10000,
+  "ui": "bdd",
+  "color": true
+}
