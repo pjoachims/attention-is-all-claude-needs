@@ -6,8 +6,10 @@ A VS Code extension that monitors [Claude Code](https://claude.ai/code) sessions
 
 ## Features
 
+- **Activity Bar View**: Tree view showing all sessions grouped by status (Attention, Running, Idle)
 - **Status Bar Overview**: See at a glance how many sessions need attention, are running, or idle
 - **Quick Session Picker**: Click the robot icon to see all sessions grouped by status
+- **Session Renaming**: Right-click any session to give it a custom name
 - **Cross-Window Focus**: In global mode, click a session and automatically switch to the correct VS Code window
 - **Auto Terminal Focus**: Finds the right terminal using PID matching - no manual linking needed
 - **Auto-Clear Attention**: When you focus a session, the attention status clears automatically
@@ -30,7 +32,7 @@ $(hubot) $(bell-dot) 2 $(clock) 1 $(play) 3
 1. Download the latest `.vsix` from [Releases](https://github.com/pjoachims/attention-is-all-claude-needs/releases)
 2. Install with:
    ```bash
-   code --install-extension attention-is-all-claude-needs-0.1.0.vsix
+   code --install-extension attention-is-all-claude-needs-*.vsix
    ```
 
 ### From Source
@@ -41,14 +43,14 @@ cd attention-is-all-claude-needs
 npm install
 npm run compile
 npm run package
-code --install-extension attention-is-all-claude-needs-0.1.0.vsix
+code --install-extension attention-is-all-claude-needs-*.vsix
 ```
 
 ### First Run
 
 On first activation, the extension will ask to set up Claude Code hooks. Click "Setup Hooks" to automatically configure:
 - `~/.claude/settings.json` - adds notification hooks
-- `~/.claude/attention-monitor/notify.sh` - hook script
+- `~/.claude/claude-attn/notify.sh` (macOS/Linux) or `notify.cmd` (Windows) - hook script
 
 Restart any running Claude Code sessions for hooks to take effect.
 
@@ -80,9 +82,9 @@ If there's only one session in a category, it focuses directly. Otherwise, shows
 
 ## How It Works
 
-1. **Claude Code Hooks**: When Claude needs attention (permission prompt, idle, etc.), a hook writes to `~/.claude/attention-monitor/sessions.json`
+1. **Claude Code Hooks**: When Claude needs attention (permission prompt, idle, etc.), a hook writes session state to `~/.claude/claude-attn/sessions/{session-id}.json`
 
-2. **File Watching**: The extension watches this file and updates the UI in real-time
+2. **File Watching**: The extension watches the sessions directory and updates the UI in real-time
 
 3. **PID Matching**: Sessions include the Claude process PID. The extension walks up the process tree to find which terminal owns that process.
 
@@ -93,11 +95,9 @@ If there's only one session in a category, it focuses directly. Otherwise, shows
 | Platform | Status |
 |----------|--------|
 | macOS | ✅ Tested |
+| Windows | ✅ Tested |
 | Linux | ⚠️ Untested (should work) |
-| Windows | ⚠️ Untested (should work) |
 | WSL | ⚠️ Untested (use VS Code in Remote-WSL mode) |
-
-> **Note:** Currently only tested on macOS. Linux and Windows support is implemented but not yet verified. Please report issues!
 
 ## Settings
 
@@ -109,14 +109,16 @@ If there's only one session in a category, it focuses directly. Otherwise, shows
 ## Commands
 
 - `Claude ATTN: Setup Hooks` - Configure Claude Code hooks
+- `Claude ATTN: Remove Hooks (Uninstall)` - Remove hooks when uninstalling
 - `Claude ATTN: Cleanup Stale Sessions` - Remove dead sessions
+- `Claude ATTN: Remove All Sessions` - Clear all session data
+- `Rename Session` - Give a session a custom name (also via right-click)
 - `Refresh Sessions` - Manually refresh session list
 
 ## Requirements
 
 - VS Code 1.85.0+
 - Claude Code CLI installed
-- Node.js (for hook script)
 
 ## License
 
