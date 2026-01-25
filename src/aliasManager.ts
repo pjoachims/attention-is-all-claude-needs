@@ -67,6 +67,10 @@ export class AliasManager {
     getCount(): number {
         return this.aliases.size;
     }
+
+    getFilePath(): string {
+        return this.aliasesFilePath;
+    }
 }
 
 // Singleton instance for shared access

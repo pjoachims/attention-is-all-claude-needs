@@ -109,10 +109,18 @@ export function activate(context: vscode.ExtensionContext) {
     focusRequestWatcher.start();
     context.subscriptions.push(focusRequestWatcher);
 
-    // Load session aliases
+    // Load session aliases and watch for changes from other windows
     aliasManager.load().then(() => {
         outputChannel.appendLine(`Loaded ${aliasManager.getCount()} session aliases`);
     });
+    const aliasFileWatcher = createFileWatcher(aliasManager.getFilePath());
+    aliasFileWatcher.onDidChange(async () => {
+        await aliasManager.load();
+        treeProvider.refresh();
+        outputChannel.appendLine(`Reloaded aliases from file (changed by another window)`);
+    });
+    aliasFileWatcher.start();
+    context.subscriptions.push(aliasFileWatcher);
 
     // Initialize session cleaner
     const sessionCleaner = new SessionCleaner(sessionManager);

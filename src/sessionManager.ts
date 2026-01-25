@@ -145,7 +145,9 @@ export class SessionManager {
     }
 
     private isFilteringEnabled(): boolean {
-        return vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('filterByWorkspace', true);
+        // When globalMode is true, filtering is disabled (show all sessions)
+        // When globalMode is false (default), filtering is enabled (show only workspace sessions)
+        return !vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('globalMode', false);
     }
 
     private isSessionInWorkspace(session: Session): boolean {
