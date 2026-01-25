@@ -206,12 +206,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<SessionItem>
     }
 
     private getSessionLabel(session: Session): string {
-        // Check for user-defined alias first
+        // Check for user-defined alias first (keyed by session ID)
+        const alias = aliasManager.get(session.id);
+        if (alias) {
+            return alias;
+        }
         if (session.cwd) {
-            const alias = aliasManager.get(session.cwd);
-            if (alias) {
-                return alias;
-            }
             return path.basename(session.cwd);
         }
         return session.id.substring(0, 8);

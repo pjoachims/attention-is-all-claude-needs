@@ -7,7 +7,7 @@ const DEBUG = false;
 
 /**
  * Manages session aliases (user-defined names for sessions)
- * Aliases are keyed by cwd to persist across session restarts
+ * Aliases are keyed by session ID for unique identification
  */
 export class AliasManager {
     private aliases: Map<string, string> = new Map();

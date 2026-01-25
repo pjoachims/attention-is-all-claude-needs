@@ -466,13 +466,14 @@ async function matchSessionToTerminal(
  * Get the display name for a session (alias or derived name)
  */
 function getSessionLabel(session: Session): string {
-    // First check for user-defined alias (keyed by cwd)
+    // First check for user-defined alias (keyed by session ID)
+    const alias = aliasManager.get(session.id);
+    if (alias) {
+        return alias;
+    }
+
+    // Fall back to directory basename
     if (session.cwd) {
-        const alias = aliasManager.get(session.cwd);
-        if (alias) {
-            return alias;
-        }
-        // Fall back to directory basename
         return path.basename(session.cwd);
     }
 
@@ -618,11 +619,11 @@ function registerCommands(
             });
 
             if (newName && newName !== currentName) {
-                aliasManager.set(session.cwd, newName);
+                aliasManager.set(session.id, newName);
                 await aliasManager.save();
                 treeProvider.refresh();
                 vscode.window.showInformationMessage(`Session renamed to "${newName}"`);
-                outputChannel.appendLine(`Renamed session at ${session.cwd} to "${newName}"`);
+                outputChannel.appendLine(`Renamed session ${session.id} to "${newName}"`);
             }
         })
     ];
