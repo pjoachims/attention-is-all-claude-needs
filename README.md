@@ -4,6 +4,8 @@ A VS Code extension that monitors [Claude Code](https://claude.ai/code) sessions
 
 > *"Attention Is All You Need"* - but for Claude Code sessions
 
+![Overview](docs/images/overview-annotated.png)
+
 ## Features
 
 - **Activity Bar View**: Tree view showing all sessions grouped by status (Attention, Running, Idle)
