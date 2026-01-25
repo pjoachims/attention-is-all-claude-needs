@@ -547,6 +547,27 @@ function registerCommands(
             }
         }),
 
+        vscode.commands.registerCommand('claude-monitor.cleanupAllSessions', async () => {
+            const sessions = sessionManager.getAllSessions();
+            if (sessions.length === 0) {
+                vscode.window.showInformationMessage('No sessions to clean up.');
+                return;
+            }
+
+            const confirm = await vscode.window.showWarningMessage(
+                `Remove all ${sessions.length} session(s)? This will clear the session list.`,
+                { modal: true },
+                'Remove All'
+            );
+
+            if (confirm === 'Remove All') {
+                const sessionIds = sessions.map(s => s.id);
+                await sessionManager.removeSessions(sessionIds);
+                treeProvider.refresh();
+                vscode.window.showInformationMessage(`Removed ${sessionIds.length} session(s).`);
+            }
+        }),
+
         vscode.commands.registerCommand('claude-monitor.renameSession', async (item?: unknown) => {
             let session: Session | undefined;
             if (item && typeof item === 'object' && 'session' in item) {
