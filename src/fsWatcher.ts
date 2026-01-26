@@ -94,18 +94,24 @@ export class FSWatcher implements vscode.Disposable {
     }
 
     private shouldHandleChange(filename: string | null): boolean {
+        // File mode: only handle changes to the specific file
+        if (this.mode === 'file') {
+            // On Windows, filename is often null - fall back to checking if file exists
+            if (!filename) {
+                return fs.existsSync(this.watchPath);
+            }
+            // Case-insensitive comparison for Windows
+            return filename.toLowerCase() === this.watchFileName?.toLowerCase();
+        }
+
+        // Directory mode
         if (!filename) {
             return false;
         }
 
-        // File mode: only handle changes to the specific file
-        if (this.mode === 'file') {
-            return filename === this.watchFileName;
-        }
-
-        // Directory mode: optionally filter by extension
+        // Optionally filter by extension
         if (this.fileFilter) {
-            return filename.endsWith(this.fileFilter);
+            return filename.toLowerCase().endsWith(this.fileFilter.toLowerCase());
         }
 
         return true;

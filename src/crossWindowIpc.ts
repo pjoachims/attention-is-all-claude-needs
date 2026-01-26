@@ -106,8 +106,7 @@ export class CrossWindowIpc {
 
             // Activate our window (bring to foreground)
             if (isWindows) {
-                const folderName = path.basename(request.folder);
-                await this.activateWindowByFolder(folderName);
+                await this.activateCurrentWindow();
             }
 
             // Focus the terminal for this session
@@ -286,6 +285,32 @@ export class CrossWindowIpc {
                 }
                 const success = stdout.toLowerCase().includes('true');
                 this.outputChannel.appendLine(`activateWindowByFolder(${folderName}): ${success}`);
+                resolve(success);
+            });
+        });
+    }
+
+    /**
+     * Activate the current VS Code window (bring to foreground).
+     * Uses the current process ID to find and activate its own window.
+     */
+    private async activateCurrentWindow(): Promise<boolean> {
+        const pid = process.pid;
+        this.outputChannel.appendLine(`Activating current window (pid: ${pid})`);
+
+        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-by-pid.ps1');
+
+        return new Promise((resolve) => {
+            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -Pid ${pid}`;
+
+            exec(cmd, { timeout: 3000 }, (error: Error | null, stdout: string) => {
+                if (error) {
+                    this.outputChannel.appendLine(`activateCurrentWindow error: ${error.message}`);
+                    resolve(false);
+                    return;
+                }
+                const success = stdout.toLowerCase().includes('true');
+                this.outputChannel.appendLine(`activateCurrentWindow: ${stdout.trim()}`);
                 resolve(success);
             });
         });

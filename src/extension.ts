@@ -99,15 +99,22 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(dirWatcherListener);
 
     directoryWatcher.start();
-    sessionManager.loadSessions();
 
-    // Watch for cross-window focus requests
-    const focusRequestWatcher = createFileWatcher(crossWindowIpc.getFocusRequestFilePath());
+    // Watch for cross-window focus requests using custom fs.watch (fixed for Windows)
+    const focusRequestPath = crossWindowIpc.getFocusRequestFilePath();
+    const focusRequestWatcher = createFileWatcher(focusRequestPath, 30); // Fast 30ms debounce
     focusRequestWatcher.onDidChange(async () => {
+        outputChannel.appendLine('Focus request file changed, checking...');
         await crossWindowIpc.handleIncomingFocusRequest(sessionManager);
     });
     focusRequestWatcher.start();
     context.subscriptions.push(focusRequestWatcher);
+    outputChannel.appendLine(`Watching for focus requests: ${focusRequestPath}`);
+
+    // Load sessions first, then check for any pending focus request
+    sessionManager.loadSessions().then(() => {
+        crossWindowIpc.handleIncomingFocusRequest(sessionManager);
+    });
 
     // Load session aliases and watch for changes from other windows
     aliasManager.load().then(() => {

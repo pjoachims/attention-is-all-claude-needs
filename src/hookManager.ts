@@ -200,6 +200,10 @@ export class HookManager {
             const bundledActivate = path.join(scriptsDir, 'activate-window.ps1');
             const activateScript = fs.readFileSync(bundledActivate, 'utf-8');
             fs.writeFileSync(path.join(MONITOR_DIR, 'activate-vscode-window.ps1'), activateScript);
+
+            const bundledActivateByPid = path.join(scriptsDir, 'activate-by-pid.ps1');
+            const activateByPidScript = fs.readFileSync(bundledActivateByPid, 'utf-8');
+            fs.writeFileSync(path.join(MONITOR_DIR, 'activate-by-pid.ps1'), activateByPidScript);
         }
     }
 
