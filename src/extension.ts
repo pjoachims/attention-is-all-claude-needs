@@ -10,6 +10,9 @@ import { StatusBarManager } from './statusBar';
 import { HookManager } from './hookManager';
 import { CrossWindowIpc } from './crossWindowIpc';
 
+// Environment variable name for window ID (passed to terminals for hook script)
+const WINDOW_ID_ENV_VAR = 'CLAUDE_ATTN_WINDOW_ID';
+
 // Debug logging - set to true for verbose console output
 const DEBUG = false;
 
@@ -100,21 +103,18 @@ export function activate(context: vscode.ExtensionContext) {
 
     directoryWatcher.start();
 
-    // Watch for cross-window focus requests using custom fs.watch (fixed for Windows)
-    const focusRequestPath = crossWindowIpc.getFocusRequestFilePath();
-    const focusRequestWatcher = createFileWatcher(focusRequestPath, 30); // Fast 30ms debounce
-    focusRequestWatcher.onDidChange(async () => {
-        outputChannel.appendLine('Focus request file changed, checking...');
-        await crossWindowIpc.handleIncomingFocusRequest(sessionManager);
-    });
-    focusRequestWatcher.start();
-    context.subscriptions.push(focusRequestWatcher);
-    outputChannel.appendLine(`Watching for focus requests: ${focusRequestPath}`);
+    // Start polling for cross-window focus requests (replaces file watcher for reliability)
+    crossWindowIpc.startPolling(sessionManager);
+    context.subscriptions.push(crossWindowIpc);
+    outputChannel.appendLine(`Polling for focus requests (windowId: ${crossWindowIpc.getWindowId()})`);
 
-    // Load sessions first, then check for any pending focus request
-    sessionManager.loadSessions().then(() => {
-        crossWindowIpc.handleIncomingFocusRequest(sessionManager);
-    });
+    // Configure terminal environment for window ID
+    // This passes the window ID to Claude Code hook scripts via environment variable
+    context.environmentVariableCollection.replace(WINDOW_ID_ENV_VAR, crossWindowIpc.getWindowId());
+    outputChannel.appendLine(`Set terminal environment: ${WINDOW_ID_ENV_VAR}=${crossWindowIpc.getWindowId()}`);
+
+    // Load sessions
+    sessionManager.loadSessions();
 
     // Load session aliases and watch for changes from other windows
     aliasManager.load().then(() => {
@@ -362,9 +362,9 @@ async function focusTerminalForSession(session: Session): Promise<void> {
 
     // In global mode, check if we need to switch VS Code windows
     if (globalMode && session.cwd) {
-        const isInCurrentWorkspace = crossWindowIpc.isSessionInCurrentWorkspace(session);
-        outputChannel.appendLine(`focusTerminalForSession: session=${session.id}, cwd=${session.cwd}, inCurrentWorkspace=${isInCurrentWorkspace}`);
-        if (!isInCurrentWorkspace) {
+        const isInCurrentWindow = crossWindowIpc.isSessionInCurrentWindow(session);
+        outputChannel.appendLine(`focusTerminalForSession: session=${session.id}, cwd=${session.cwd}, windowId=${session.windowId}, inCurrentWindow=${isInCurrentWindow}`);
+        if (!isInCurrentWindow) {
             // Try to switch to the correct VS Code window
             const switched = await crossWindowIpc.switchToWindow(session);
             if (switched) {

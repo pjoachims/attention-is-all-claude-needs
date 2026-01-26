@@ -2,34 +2,38 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { Session, SessionManager } from './sessionManager';
-import { isWindows } from './platform';
 import { terminalTracker } from './terminalTracker';
 
-// Default focus request file for cross-window communication
-const DEFAULT_FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'focus-request.json');
+// Single focus request file - all windows watch this, self-select by workspace match
+const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'focus-request.json');
 
 interface FocusRequest {
     sessionId: string;
-    folder: string;
-    vscodeIpcHandle?: string;
+    cwd: string;  // Used for workspace matching (fallback)
+    vscodeIpcHandle?: string;  // Target window's IPC handle (primary matching)
     timestamp: number;
 }
 
 export interface CrossWindowIpcOptions {
     focusRequestFile?: string;
-    monitorDir?: string;
 }
 
 /**
  * Manages cross-window communication for focusing sessions in other VS Code windows.
+ * Uses a broadcast model: writes to a single file, all windows check if it's for them.
  */
-export class CrossWindowIpc {
+export class CrossWindowIpc implements vscode.Disposable {
     private readonly outputChannel: vscode.OutputChannel;
     private readonly matchSessionToTerminal: (session: Session, terminals: readonly vscode.Terminal[]) => Promise<vscode.Terminal | undefined>;
     private readonly clearAttentionIfNeeded: (session: Session) => Promise<void>;
     private readonly focusRequestFile: string;
+    private readonly windowId: string;
+    private readonly myIpcHandle: string | undefined;  // This window's unique IPC handle
+    private pollingInterval: NodeJS.Timeout | null = null;
+    private lastMtime: number = 0;
+    private sessionManager: SessionManager | null = null;
 
     constructor(
         outputChannel: vscode.OutputChannel,
@@ -40,97 +44,185 @@ export class CrossWindowIpc {
         this.outputChannel = outputChannel;
         this.matchSessionToTerminal = matchSessionToTerminal;
         this.clearAttentionIfNeeded = clearAttentionIfNeeded;
-        this.focusRequestFile = options?.focusRequestFile ?? DEFAULT_FOCUS_REQUEST_FILE;
+        this.focusRequestFile = options?.focusRequestFile ?? FOCUS_REQUEST_FILE;
+        this.windowId = vscode.env.sessionId;
+        this.myIpcHandle = process.env.VSCODE_GIT_IPC_HANDLE;
+
+        this.outputChannel.appendLine(`CrossWindowIpc initialized with windowId: ${this.windowId}, ipcHandle: ${this.myIpcHandle ?? 'none'}`);
     }
 
     /**
-     * Get the focus request file path.
+     * Get the unique window ID for this VS Code window.
      */
-    getFocusRequestFilePath(): string {
-        return this.focusRequestFile;
+    getWindowId(): string {
+        return this.windowId;
     }
 
     /**
-     * Handle incoming focus request from another VS Code window.
+     * Start polling for incoming focus requests.
      */
-    async handleIncomingFocusRequest(sessionManager: SessionManager): Promise<void> {
+    startPolling(sessionManager: SessionManager): void {
+        this.sessionManager = sessionManager;
+
+        // Ensure directory exists
+        const dir = path.dirname(this.focusRequestFile);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        // Check for any pending focus request immediately
+        this.checkForFocusRequest();
+
+        // Poll every 250ms
+        this.pollingInterval = setInterval(() => {
+            this.checkForFocusRequest();
+        }, 250);
+
+        this.outputChannel.appendLine(`Started polling for focus requests (windowId: ${this.windowId})`);
+    }
+
+    /**
+     * Stop polling for focus requests.
+     */
+    stopPolling(): void {
+        if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+    }
+
+    /**
+     * Check for an incoming focus request.
+     * All windows check the same file; only the one with matching workspace handles it.
+     */
+    private checkForFocusRequest(): void {
         try {
-            if (!fs.existsSync(this.focusRequestFile)) {
+            // Check if file exists using stat (also gets mtime for optimization)
+            const stat = fs.statSync(this.focusRequestFile);
+            const mtime = stat.mtimeMs;
+
+            // Skip if we've already processed this version
+            if (mtime === this.lastMtime) {
                 return;
             }
+            this.lastMtime = mtime;
 
+            // Read the request
             const content = fs.readFileSync(this.focusRequestFile, 'utf-8');
             const request: FocusRequest = JSON.parse(content);
 
-            // Delete and ignore stale requests (older than 5 seconds)
+            // Ignore stale requests (older than 5 seconds)
             if (Date.now() - request.timestamp > 5000) {
-                this.outputChannel.appendLine(`Ignoring stale focus request for ${request.folder}`);
-                try {
-                    fs.unlinkSync(this.focusRequestFile);
-                } catch {
-                    // Ignore - file may have been already deleted
-                }
+                this.outputChannel.appendLine(`Ignoring stale focus request for session ${request.sessionId}`);
                 return;
             }
 
-            // Check if this request is for us by matching IPC handle
-            const myIpcHandle = process.env.VSCODE_GIT_IPC_HANDLE;
-            if (request.vscodeIpcHandle && myIpcHandle) {
-                if (request.vscodeIpcHandle !== myIpcHandle) {
-                    this.outputChannel.appendLine(`Focus request not for this window (IPC mismatch)`);
+            // Check if this request is for us - prefer IPC handle matching (exact), fall back to cwd
+            if (request.vscodeIpcHandle && this.myIpcHandle) {
+                // IPC handle matching - exact match required
+                if (request.vscodeIpcHandle !== this.myIpcHandle) {
+                    this.outputChannel.appendLine(`Focus request not for this window (IPC mismatch: ${request.vscodeIpcHandle} vs ${this.myIpcHandle})`);
                     return;
                 }
+                this.outputChannel.appendLine(`Focus request matched by IPC handle`);
             } else {
-                // Fallback to folder matching if no IPC handle
-                if (!this.isFolderInCurrentWorkspace(request.folder)) {
-                    this.outputChannel.appendLine(`Focus request not for this workspace: ${request.folder}`);
+                // Fallback: cwd-based workspace matching (for sessions without IPC handle)
+                if (!this.isCwdInCurrentWorkspace(request.cwd)) {
+                    this.outputChannel.appendLine(`Focus request not for this workspace: ${request.cwd}`);
                     return;
                 }
+                this.outputChannel.appendLine(`Focus request matched by workspace folder`);
             }
 
             this.outputChannel.appendLine(`Handling focus request for session ${request.sessionId}`);
 
-            // Clear the request file first (we're handling it)
+            // Delete file immediately (we're handling it)
             try {
                 fs.unlinkSync(this.focusRequestFile);
             } catch {
                 // Ignore - another window might have already handled it
             }
 
-            // Find the session
-            const session = sessionManager.getAllSessions().find(s => s.id === request.sessionId);
-            if (!session) {
-                this.outputChannel.appendLine(`Session not found: ${request.sessionId}`);
-                return;
-            }
-
-            // Activate our window (bring to foreground)
-            if (isWindows) {
-                await this.activateCurrentWindow();
-            }
-
-            // Focus the terminal for this session
-            const terminals = vscode.window.terminals;
-            if (terminals.length === 0) {
-                return;
-            }
-
-            // Try terminal matching
-            const matched = await this.matchSessionToTerminal(session, terminals);
-            if (matched) {
-                terminalTracker.associate(session.id, matched);
-                this.outputChannel.appendLine(`Focus request: matched terminal "${matched.name}"`);
-                matched.show(false);
-                await vscode.commands.executeCommand('workbench.action.terminal.focus');
-                await this.clearAttentionIfNeeded(session);
-            } else if (terminals.length === 1) {
-                terminals[0].show(false);
-                await vscode.commands.executeCommand('workbench.action.terminal.focus');
-                await this.clearAttentionIfNeeded(session);
-            }
-        } catch (error) {
-            this.outputChannel.appendLine(`Error handling focus request: ${error}`);
+            this.handleFocusRequest(request);
+        } catch {
+            // File doesn't exist or can't be read - this is normal, ignore
         }
+    }
+
+    /**
+     * Check if a cwd path is within the current workspace folders.
+     */
+    private isCwdInCurrentWorkspace(cwd: string): boolean {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            return false;
+        }
+
+        // Normalize for comparison (handle escaped backslashes from JSON)
+        const normalizedCwd = cwd.replace(/\\\\/g, '\\').toLowerCase();
+
+        return workspaceFolders.some(f => {
+            const folderPath = f.uri.fsPath.toLowerCase();
+            return normalizedCwd.startsWith(folderPath) || folderPath.startsWith(normalizedCwd);
+        });
+    }
+
+    /**
+     * Handle an incoming focus request.
+     */
+    private async handleFocusRequest(request: FocusRequest): Promise<void> {
+        if (!this.sessionManager) {
+            return;
+        }
+
+        // Find the session
+        const session = this.sessionManager.getAllSessions().find(s => s.id === request.sessionId);
+        if (!session) {
+            this.outputChannel.appendLine(`Session not found: ${request.sessionId}`);
+            return;
+        }
+
+        // Focus the terminal for this session
+        const terminals = vscode.window.terminals;
+        if (terminals.length === 0) {
+            return;
+        }
+
+        // Try terminal matching
+        const matched = await this.matchSessionToTerminal(session, terminals);
+        if (matched) {
+            terminalTracker.associate(session.id, matched);
+            this.outputChannel.appendLine(`Focus request: matched terminal "${matched.name}"`);
+            matched.show(false);
+            await vscode.commands.executeCommand('workbench.action.terminal.focus');
+            await this.clearAttentionIfNeeded(session);
+        } else if (terminals.length === 1) {
+            terminals[0].show(false);
+            await vscode.commands.executeCommand('workbench.action.terminal.focus');
+            await this.clearAttentionIfNeeded(session);
+        }
+    }
+
+    /**
+     * Activate a VS Code window by folder name using PowerShell (Windows only).
+     * Uses EnumWindows + AttachThreadInput + SetForegroundWindow for robust activation.
+     */
+    private async activateWindowByFolder(folderName: string): Promise<boolean> {
+        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-window.ps1');
+
+        return new Promise((resolve) => {
+            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -FolderName "${folderName}"`;
+            exec(cmd, { timeout: 3000 }, (error, stdout) => {
+                if (error) {
+                    this.outputChannel.appendLine(`activateWindowByFolder error: ${error.message}`);
+                    resolve(false);
+                    return;
+                }
+                const success = stdout.toLowerCase().includes('true');
+                this.outputChannel.appendLine(`activateWindowByFolder result: ${stdout.trim()}`);
+                resolve(success);
+            });
+        });
     }
 
     /**
@@ -138,47 +230,57 @@ export class CrossWindowIpc {
      */
     async switchToWindow(session: Session): Promise<boolean> {
         const folderPath = session.cwd!;
-        const gitRoot = await this.getGitRoot(folderPath);
-        const targetPath = gitRoot || folderPath;
-        const folderName = path.basename(targetPath);
+        const folderName = path.basename(folderPath);
 
-        this.outputChannel.appendLine(`switchToVSCodeWindow: session=${session.id}, folder=${folderName}, ipc=${session.vscodeIpcHandle}`);
+        this.outputChannel.appendLine(`switchToWindow: session=${session.id}, cwd=${folderPath}, ipcHandle=${session.vscodeIpcHandle ?? 'none'}`);
 
-        // Write focus request with IPC handle
-        this.writeFocusRequest(session.id, targetPath, session.vscodeIpcHandle);
+        // Write focus request with IPC handle for exact window matching
+        this.writeFocusRequest(session.id, folderPath, session.vscodeIpcHandle);
 
-        // Try to activate the window from here for faster response
-        if (isWindows) {
+        // Windows: Try PowerShell window activation first (robust, doesn't open new windows)
+        // Note: May activate wrong window if two folders share the same basename
+        if (process.platform === 'win32') {
             const activated = await this.activateWindowByFolder(folderName);
             if (activated) {
                 this.outputChannel.appendLine(`Window activated via folder name "${folderName}"`);
                 return true;
             }
-            this.outputChannel.appendLine(`Folder activation failed, falling back to code command`);
+            this.outputChannel.appendLine(`PowerShell activation failed, falling back to code command`);
         }
 
-        // Fallback: Find a file to open (this triggers window focus)
-        const fileToOpen = await this.findFileToOpen(targetPath);
-        if (!fileToOpen) {
-            this.outputChannel.appendLine(`No file found to open in ${targetPath}`);
-            return false;
-        }
+        // // COMMENTED OUT: VS Code URI protocol (has issues on Windows)
+        // try {
+        //     const fileUri = vscode.Uri.file(folderPath);
+        //     const vscodeUri = vscode.Uri.parse(`vscode://file${fileUri.path}`);
+        //     this.outputChannel.appendLine(`Trying VS Code URI: ${vscodeUri.toString()}`);
+        //     const opened = await vscode.env.openExternal(vscodeUri);
+        //     if (opened) {
+        //         this.outputChannel.appendLine(`Window activated via VS Code URI protocol`);
+        //         return true;
+        //     }
+        // } catch (error) {
+        //     this.outputChannel.appendLine(`VS Code URI protocol error: ${error}`);
+        // }
 
-        return new Promise((resolve) => {
-            const cmd = isWindows
-                ? `cmd.exe /c start "" code "${fileToOpen}"`
-                : `code "${fileToOpen}"`;
-
-            exec(cmd, { timeout: 5000 }, (error: Error | null) => {
-                if (error) {
-                    this.outputChannel.appendLine(`code command error: ${error.message}`);
-                    resolve(false);
-                    return;
-                }
-                this.outputChannel.appendLine(`Opened file to switch window: ${fileToOpen}`);
-                resolve(true);
+        // Fallback: Spawn detached process to run code command
+        // This creates a truly independent process that behaves like running from external terminal
+        if (process.platform === 'win32') {
+            const child = spawn('cmd.exe', ['/c', 'code', folderPath], {
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true
             });
-        });
+            child.unref();
+        } else {
+            const child = spawn('code', [folderPath], {
+                detached: true,
+                stdio: 'ignore'
+            });
+            child.unref();
+        }
+
+        this.outputChannel.appendLine(`Spawned detached code process for: ${folderPath}`);
+        return true;
     }
 
     /**
@@ -186,36 +288,26 @@ export class CrossWindowIpc {
      */
     isSessionInCurrentWorkspace(session: Session): boolean {
         if (!session.cwd) { return false; }
-
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            return false;
-        }
-
-        return workspaceFolders.some(f => session.cwd!.startsWith(f.uri.fsPath));
+        return this.isCwdInCurrentWorkspace(session.cwd);
     }
 
-    private isFolderInCurrentWorkspace(folderPath: string): boolean {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            return false;
+    /**
+     * Check if a session belongs to this window.
+     * Uses IPC handle matching (exact) if available, falls back to workspace folder matching.
+     */
+    isSessionInCurrentWindow(session: Session): boolean {
+        // Prefer IPC handle matching - exact and reliable
+        if (session.vscodeIpcHandle && this.myIpcHandle) {
+            return session.vscodeIpcHandle === this.myIpcHandle;
         }
-
-        const normalizedFolder = folderPath.replace(/\//g, '\\').toLowerCase();
-
-        for (const f of workspaceFolders) {
-            const normalizedWorkspace = f.uri.fsPath.toLowerCase();
-            if (normalizedFolder.startsWith(normalizedWorkspace) || normalizedWorkspace.startsWith(normalizedFolder)) {
-                return true;
-            }
-        }
-        return false;
+        // Fallback to workspace folder matching
+        return this.isSessionInCurrentWorkspace(session);
     }
 
-    private writeFocusRequest(sessionId: string, folder: string, vscodeIpcHandle?: string): void {
+    private writeFocusRequest(sessionId: string, cwd: string, vscodeIpcHandle?: string): void {
         const request: FocusRequest = {
             sessionId,
-            folder,
+            cwd,
             vscodeIpcHandle,
             timestamp: Date.now()
         };
@@ -226,93 +318,10 @@ export class CrossWindowIpc {
         }
 
         fs.writeFileSync(this.focusRequestFile, JSON.stringify(request, null, 2));
-        this.outputChannel.appendLine(`Wrote focus request for ${sessionId} in ${folder}`);
+        this.outputChannel.appendLine(`Wrote focus request to ${this.focusRequestFile} (ipcHandle: ${vscodeIpcHandle ?? 'none'})`);
     }
 
-    private async findFileToOpen(folderPath: string): Promise<string | null> {
-        const candidates = ['README.md', 'package.json', '.gitignore', 'Cargo.toml', 'go.mod'];
-
-        for (const candidate of candidates) {
-            const filePath = path.join(folderPath, candidate);
-            if (fs.existsSync(filePath)) {
-                return filePath;
-            }
-        }
-
-        try {
-            const files = fs.readdirSync(folderPath);
-            for (const file of files) {
-                const filePath = path.join(folderPath, file);
-                const stat = fs.statSync(filePath);
-                if (stat.isFile() && !file.startsWith('.')) {
-                    return filePath;
-                }
-            }
-        } catch {
-            // Ignore errors
-        }
-
-        return null;
-    }
-
-    private async getGitRoot(folderPath: string): Promise<string | null> {
-        return new Promise((resolve) => {
-            exec(`git -C "${folderPath}" rev-parse --show-toplevel`, (error: Error | null, stdout: string) => {
-                if (error) {
-                    resolve(null);
-                    return;
-                }
-                resolve(stdout.trim());
-            });
-        });
-    }
-
-    private async activateWindowByFolder(folderName: string): Promise<boolean> {
-        if (!isWindows) {
-            return false;
-        }
-
-        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-vscode-window.ps1');
-
-        return new Promise((resolve) => {
-            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -FolderName "${folderName}"`;
-
-            exec(cmd, { timeout: 3000 }, (error: Error | null, stdout: string) => {
-                if (error) {
-                    this.outputChannel.appendLine(`activateWindowByFolder error: ${error.message}`);
-                    resolve(false);
-                    return;
-                }
-                const success = stdout.toLowerCase().includes('true');
-                this.outputChannel.appendLine(`activateWindowByFolder(${folderName}): ${success}`);
-                resolve(success);
-            });
-        });
-    }
-
-    /**
-     * Activate the current VS Code window (bring to foreground).
-     * Uses the current process ID to find and activate its own window.
-     */
-    private async activateCurrentWindow(): Promise<boolean> {
-        const pid = process.pid;
-        this.outputChannel.appendLine(`Activating current window (pid: ${pid})`);
-
-        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-by-pid.ps1');
-
-        return new Promise((resolve) => {
-            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -ProcessId ${pid}`;
-
-            exec(cmd, { timeout: 3000 }, (error: Error | null, stdout: string) => {
-                if (error) {
-                    this.outputChannel.appendLine(`activateCurrentWindow error: ${error.message}`);
-                    resolve(false);
-                    return;
-                }
-                const success = stdout.toLowerCase().includes('true');
-                this.outputChannel.appendLine(`activateCurrentWindow: ${stdout.trim()}`);
-                resolve(success);
-            });
-        });
+    dispose(): void {
+        this.stopPolling();
     }
 }

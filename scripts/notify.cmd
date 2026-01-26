@@ -36,10 +36,13 @@ if defined CLAUDE_WORKING_DIRECTORY (
 :: Escape backslashes for JSON
 set "CWD=!CWD:\=\\!"
 
-:: VS Code IPC handle - unique per VS Code window
+:: VS Code IPC handle - unique per VS Code window (deprecated, kept for compatibility)
 set "IPC_HANDLE=%VSCODE_GIT_IPC_HANDLE%"
 :: Escape backslashes in IPC handle for JSON
 set "IPC_HANDLE=!IPC_HANDLE:\=\\!"
+
+:: Window ID from Claude ATTN extension (unique per VS Code window)
+set "WINDOW_ID=%CLAUDE_ATTN_WINDOW_ID%"
 
 set "SESSIONS_DIR=%USERPROFILE%\.claude\claude-attn\sessions"
 if not exist "%SESSIONS_DIR%" mkdir "%SESSIONS_DIR%"
@@ -54,6 +57,7 @@ set "EXTRA_FIELDS="
 if defined CLAUDE_PID if not "!CLAUDE_PID!"=="" set EXTRA_FIELDS=,"claudePid":!CLAUDE_PID!
 if defined TERMINAL_PID if not "!TERMINAL_PID!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"terminalPid":!TERMINAL_PID!
 if defined IPC_HANDLE if not "!IPC_HANDLE!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"vscodeIpcHandle":"!IPC_HANDLE!"
+if defined WINDOW_ID if not "!WINDOW_ID!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"windowId":"!WINDOW_ID!"
 
 if "%ACTION%"=="attention" (
     echo {"id":"!SESSION_ID!","status":"attention","reason":"%REASON%","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"!EXTRA_FIELDS!}>"%SESSION_FILE%"

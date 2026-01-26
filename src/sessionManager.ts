@@ -15,7 +15,8 @@ export interface Session {
     cwd?: string;
     lastUpdate: string;
     terminalPid?: number;    // Terminal shell PID (for fast terminal matching)
-    vscodeIpcHandle?: string; // VS Code IPC handle (unique per window, for cross-window switching)
+    vscodeIpcHandle?: string; // VS Code IPC handle (deprecated, kept for compatibility)
+    windowId?: string;        // VS Code window ID (vscode.env.sessionId, for cross-window switching)
 }
 
 export class SessionManager {
