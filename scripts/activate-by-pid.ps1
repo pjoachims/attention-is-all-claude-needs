@@ -1,8 +1,8 @@
 # Activate window by process ID
-# Usage: activate-by-pid.ps1 -Pid 12345
+# Usage: activate-by-pid.ps1 -ProcessId 12345
 param(
     [Parameter(Mandatory=$true)]
-    [int]$Pid
+    [int]$ProcessId
 )
 
 Add-Type @"
@@ -61,7 +61,7 @@ public class WindowActivator {
 }
 "@
 
-$proc = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+$proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
 if (-not $proc) {
     Write-Output "ProcessNotFound"
     exit 1

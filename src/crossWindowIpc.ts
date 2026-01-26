@@ -166,7 +166,7 @@ export class CrossWindowIpc {
 
         return new Promise((resolve) => {
             const cmd = isWindows
-                ? `cmd.exe /c start /min code "${fileToOpen}"`
+                ? `cmd.exe /c start "" code "${fileToOpen}"`
                 : `code "${fileToOpen}"`;
 
             exec(cmd, { timeout: 5000 }, (error: Error | null) => {
@@ -301,7 +301,7 @@ export class CrossWindowIpc {
         const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-by-pid.ps1');
 
         return new Promise((resolve) => {
-            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -Pid ${pid}`;
+            const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -ProcessId ${pid}`;
 
             exec(cmd, { timeout: 3000 }, (error: Error | null, stdout: string) => {
                 if (error) {
