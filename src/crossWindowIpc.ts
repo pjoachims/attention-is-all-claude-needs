@@ -12,7 +12,8 @@ const FOCUS_REQUEST_FILE = path.join(os.homedir(), '.claude', 'claude-attn', 'fo
 interface FocusRequest {
     sessionId: string;
     cwd: string;  // Used for workspace matching (fallback)
-    vscodeIpcHandle?: string;  // Target window's IPC handle (primary matching)
+    vscodeIpcHandle?: string;  // Target window's IPC handle (deprecated, kept for compatibility)
+    windowHandle?: string;  // Windows HWND for direct window activation
     timestamp: number;
 }
 
@@ -30,10 +31,18 @@ export class CrossWindowIpc implements vscode.Disposable {
     private readonly clearAttentionIfNeeded: (session: Session) => Promise<void>;
     private readonly focusRequestFile: string;
     private readonly windowId: string;
-    private readonly myIpcHandle: string | undefined;  // This window's unique IPC handle
     private pollingInterval: NodeJS.Timeout | null = null;
     private lastMtime: number = 0;
     private sessionManager: SessionManager | null = null;
+    private _learnedIpcHandle: string | undefined;  // Learned from sessions in our workspace
+
+    /**
+     * Get this window's IPC handle.
+     * Learned from sessions that belong to this workspace (since extension host doesn't have it).
+     */
+    private get myIpcHandle(): string | undefined {
+        return this._learnedIpcHandle;
+    }
 
     constructor(
         outputChannel: vscode.OutputChannel,
@@ -46,9 +55,8 @@ export class CrossWindowIpc implements vscode.Disposable {
         this.clearAttentionIfNeeded = clearAttentionIfNeeded;
         this.focusRequestFile = options?.focusRequestFile ?? FOCUS_REQUEST_FILE;
         this.windowId = vscode.env.sessionId;
-        this.myIpcHandle = process.env.VSCODE_GIT_IPC_HANDLE;
 
-        this.outputChannel.appendLine(`CrossWindowIpc initialized with windowId: ${this.windowId}, ipcHandle: ${this.myIpcHandle ?? 'none'}`);
+        this.outputChannel.appendLine(`CrossWindowIpc initialized with windowId: ${this.windowId}`);
     }
 
     /**
@@ -56,6 +64,23 @@ export class CrossWindowIpc implements vscode.Disposable {
      */
     getWindowId(): string {
         return this.windowId;
+    }
+
+    /**
+     * Learn our IPC handle from sessions that belong to this workspace.
+     * Called when sessions are loaded/updated.
+     */
+    learnIpcHandleFromSessions(sessions: Session[]): void {
+        // Find a session that's in our workspace and has an IPC handle
+        for (const session of sessions) {
+            if (session.vscodeIpcHandle && this.isCwdInCurrentWorkspace(session.cwd ?? '')) {
+                if (this._learnedIpcHandle !== session.vscodeIpcHandle) {
+                    this._learnedIpcHandle = session.vscodeIpcHandle;
+                    this.outputChannel.appendLine(`Learned IPC handle from session ${session.id}: ${this._learnedIpcHandle}`);
+                }
+                return;  // Found one, no need to check more
+            }
+        }
     }
 
     /**
@@ -182,6 +207,11 @@ export class CrossWindowIpc implements vscode.Disposable {
             return;
         }
 
+        // Bring this window to foreground (Windows only)
+        if (process.platform === 'win32') {
+            await this.bringThisWindowToForeground();
+        }
+
         // Focus the terminal for this session
         const terminals = vscode.window.terminals;
         if (terminals.length === 0) {
@@ -201,6 +231,47 @@ export class CrossWindowIpc implements vscode.Disposable {
             await vscode.commands.executeCommand('workbench.action.terminal.focus');
             await this.clearAttentionIfNeeded(session);
         }
+    }
+
+    /**
+     * Bring a VS Code window to foreground by its window handle (Windows only).
+     */
+    private async bringWindowToForegroundByHandle(windowHandle: string): Promise<boolean> {
+        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-by-handle.ps1');
+        const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -Handle ${windowHandle}`;
+
+        return new Promise((resolve) => {
+            exec(cmd, { timeout: 3000 }, (error, stdout) => {
+                if (error) {
+                    this.outputChannel.appendLine(`bringWindowToForegroundByHandle error: ${error.message}`);
+                    resolve(false);
+                } else {
+                    const result = stdout.trim();
+                    this.outputChannel.appendLine(`bringWindowToForegroundByHandle: ${result}`);
+                    resolve(result.startsWith('OK'));
+                }
+            });
+        });
+    }
+
+    /**
+     * Bring this VS Code window to foreground by finding parent Code.exe process (Windows only).
+     * Used as a fallback when no window handle is available.
+     */
+    private async bringThisWindowToForeground(): Promise<void> {
+        const scriptPath = path.join(os.homedir(), '.claude', 'claude-attn', 'activate-by-pid.ps1');
+        const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}" -ExtHostPid ${process.pid}`;
+
+        return new Promise((resolve) => {
+            exec(cmd, { timeout: 3000 }, (error, stdout) => {
+                if (error) {
+                    this.outputChannel.appendLine(`bringThisWindowToForeground error: ${error.message}`);
+                } else {
+                    this.outputChannel.appendLine(`bringThisWindowToForeground: ${stdout.trim()}`);
+                }
+                resolve();
+            });
+        });
     }
 
     /**
@@ -232,13 +303,22 @@ export class CrossWindowIpc implements vscode.Disposable {
         const folderPath = session.cwd!;
         const folderName = path.basename(folderPath);
 
-        this.outputChannel.appendLine(`switchToWindow: session=${session.id}, cwd=${folderPath}, ipcHandle=${session.vscodeIpcHandle ?? 'none'}`);
+        this.outputChannel.appendLine(`switchToWindow: session=${session.id}, cwd=${folderPath}, windowHandle=${session.windowHandle ?? 'none'}`);
 
-        // Write focus request with IPC handle for exact window matching
-        this.writeFocusRequest(session.id, folderPath, session.vscodeIpcHandle);
+        // Write focus request for cross-window IPC
+        this.writeFocusRequest(session.id, folderPath, session.vscodeIpcHandle, session.windowHandle);
 
-        // Windows: Try PowerShell window activation first (robust, doesn't open new windows)
-        // Note: May activate wrong window if two folders share the same basename
+        // Windows: Use window handle for direct, reliable activation
+        if (process.platform === 'win32' && session.windowHandle) {
+            const activated = await this.bringWindowToForegroundByHandle(session.windowHandle);
+            if (activated) {
+                this.outputChannel.appendLine(`Window activated via handle ${session.windowHandle}`);
+                return true;
+            }
+            this.outputChannel.appendLine(`Window handle activation failed (handle may be stale), trying folder name`);
+        }
+
+        // Windows fallback: Try folder name matching (less reliable but doesn't require handle)
         if (process.platform === 'win32') {
             const activated = await this.activateWindowByFolder(folderName);
             if (activated) {
@@ -304,11 +384,12 @@ export class CrossWindowIpc implements vscode.Disposable {
         return this.isSessionInCurrentWorkspace(session);
     }
 
-    private writeFocusRequest(sessionId: string, cwd: string, vscodeIpcHandle?: string): void {
+    private writeFocusRequest(sessionId: string, cwd: string, vscodeIpcHandle?: string, windowHandle?: string): void {
         const request: FocusRequest = {
             sessionId,
             cwd,
             vscodeIpcHandle,
+            windowHandle,
             timestamp: Date.now()
         };
 

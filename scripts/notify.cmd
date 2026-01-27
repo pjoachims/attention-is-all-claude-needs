@@ -13,11 +13,18 @@ set "PS_SCRIPT=%USERPROFILE%\.claude\claude-attn\get-pids.ps1"
 set "SESSION_ID="
 set "CLAUDE_PID="
 set "TERMINAL_PID="
+set "WINDOW_HANDLE="
 
 :: Get Claude PID and Terminal PID via PowerShell helper script
 for /f "usebackq tokens=1,2 delims=," %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"`) do (
     set "CLAUDE_PID=%%A"
     set "TERMINAL_PID=%%B"
+)
+
+:: Capture the foreground window handle (the VS Code window that launched this session)
+:: This is reliable because the hook runs synchronously during session start
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();' -Name W -Namespace U; [U.W]::GetForegroundWindow().ToInt64()"`) do (
+    set "WINDOW_HANDLE=%%H"
 )
 
 if defined CLAUDE_SESSION_ID (
@@ -58,6 +65,7 @@ if defined CLAUDE_PID if not "!CLAUDE_PID!"=="" set EXTRA_FIELDS=,"claudePid":!C
 if defined TERMINAL_PID if not "!TERMINAL_PID!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"terminalPid":!TERMINAL_PID!
 if defined IPC_HANDLE if not "!IPC_HANDLE!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"vscodeIpcHandle":"!IPC_HANDLE!"
 if defined WINDOW_ID if not "!WINDOW_ID!"=="" set EXTRA_FIELDS=!EXTRA_FIELDS!,"windowId":"!WINDOW_ID!"
+if defined WINDOW_HANDLE if not "!WINDOW_HANDLE!"=="" if not "!WINDOW_HANDLE!"=="0" set EXTRA_FIELDS=!EXTRA_FIELDS!,"windowHandle":"!WINDOW_HANDLE!"
 
 if "%ACTION%"=="attention" (
     echo {"id":"!SESSION_ID!","status":"attention","reason":"%REASON%","cwd":"!CWD!","lastUpdate":"!TIMESTAMP!"!EXTRA_FIELDS!}>"%SESSION_FILE%"

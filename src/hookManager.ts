@@ -80,9 +80,9 @@ export class HookManager {
                 }
             }
 
-            // On Windows, remove deprecated PowerShell activation scripts (activate-window.ps1 is still needed)
+            // On Windows, remove deprecated PowerShell activation scripts
             if (isWindows) {
-                const deprecatedScripts = ['activate-vscode-window.ps1', 'activate-by-pid.ps1'];
+                const deprecatedScripts = ['activate-vscode-window.ps1'];
                 for (const script of deprecatedScripts) {
                     const scriptPath = path.join(MONITOR_DIR, script);
                     if (fs.existsSync(scriptPath)) {
@@ -210,10 +210,20 @@ export class HookManager {
             const getPidsScript = fs.readFileSync(bundledGetPids, 'utf-8');
             fs.writeFileSync(path.join(MONITOR_DIR, 'get-pids.ps1'), getPidsScript);
 
-            // Deploy activate-window.ps1 for robust window switching on Windows
+            // Deploy activate-window.ps1 for robust window switching on Windows (fallback)
             const bundledActivateWindow = path.join(scriptsDir, 'activate-window.ps1');
             const activateWindowScript = fs.readFileSync(bundledActivateWindow, 'utf-8');
             fs.writeFileSync(path.join(MONITOR_DIR, 'activate-window.ps1'), activateWindowScript);
+
+            // Deploy activate-by-handle.ps1 for direct window activation via HWND
+            const bundledActivateByHandle = path.join(scriptsDir, 'activate-by-handle.ps1');
+            const activateByHandleScript = fs.readFileSync(bundledActivateByHandle, 'utf-8');
+            fs.writeFileSync(path.join(MONITOR_DIR, 'activate-by-handle.ps1'), activateByHandleScript);
+
+            // Deploy activate-by-pid.ps1 for self-activation when handling focus requests
+            const bundledActivateByPid = path.join(scriptsDir, 'activate-by-pid.ps1');
+            const activateByPidScript = fs.readFileSync(bundledActivateByPid, 'utf-8');
+            fs.writeFileSync(path.join(MONITOR_DIR, 'activate-by-pid.ps1'), activateByPidScript);
         }
     }
 

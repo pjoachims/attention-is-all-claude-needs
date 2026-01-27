@@ -63,6 +63,9 @@ export function activate(context: vscode.ExtensionContext) {
     const sessionChangeListener = sessionManager.onDidChange(() => {
         updateStatusBar(sessionManager);
 
+        // Learn our IPC handle from sessions in our workspace
+        crossWindowIpc.learnIpcHandleFromSessions(sessionManager.getAllSessions());
+
         // Clean up ended sessions
         const currentIds = new Set(sessionManager.getAllSessions().map(s => s.id));
         for (const sessionId of terminalTracker.getAssociatedSessionIds()) {

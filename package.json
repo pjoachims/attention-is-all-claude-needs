@@ -2,7 +2,7 @@
   "name": "attention-is-all-claude-needs",
   "displayName": "Attention Is All Claude Needs",
   "description": "Monitor Claude Code sessions across VS Code windows - see which need attention, jump to them instantly",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "publisher": "pjoachims",
   "repository": {
     "type": "git",

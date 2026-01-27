@@ -1,32 +1,15 @@
-# Activate VS Code window by walking up from extension host PID to find Code.exe
-# Usage: activate-by-pid.ps1 -ExtHostPid 12345
+# Activate VS Code window by window handle (HWND)
+# Usage: activate-by-handle.ps1 -Handle 12345
 param(
     [Parameter(Mandatory=$true)]
-    [int]$ExtHostPid
+    [long]$Handle
 )
-
-# Walk up the process tree to find Code.exe
-$p = Get-CimInstance Win32_Process -Filter "ProcessId=$ExtHostPid" -ErrorAction SilentlyContinue
-while ($p -and $p.Name -ne 'Code.exe') {
-    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)" -ErrorAction SilentlyContinue
-}
-
-if (-not $p) {
-    Write-Output "NoCodeProcess"
-    exit 1
-}
-
-$proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
-if (-not $proc -or $proc.MainWindowHandle -eq [IntPtr]::Zero) {
-    Write-Output "NoWindow:$($p.ProcessId)"
-    exit 1
-}
 
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 
-public class WinFocus {
+public class WinActivate {
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -35,6 +18,9 @@ public class WinFocus {
 
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
@@ -52,6 +38,7 @@ public class WinFocus {
 
     public static bool ActivateWindow(IntPtr hWnd) {
         if (hWnd == IntPtr.Zero) return false;
+        if (!IsWindow(hWnd)) return false;
 
         IntPtr foregroundHwnd = GetForegroundWindow();
         uint dummy;
@@ -78,5 +65,11 @@ public class WinFocus {
 }
 "@
 
-$result = [WinFocus]::ActivateWindow($proc.MainWindowHandle)
-Write-Output "OK:$($p.ProcessId):$result"
+$hWnd = [IntPtr]::new($Handle)
+if (-not [WinActivate]::IsWindow($hWnd)) {
+    Write-Output "InvalidHandle"
+    exit 1
+}
+
+$result = [WinActivate]::ActivateWindow($hWnd)
+Write-Output "OK:$result"
